@@ -198,7 +198,7 @@ risk = LOW                 →  AUTO_MERGE
 risk = MEDIUM or HIGH      →  HITL_REQUIRED
 ```
 
-### 4e. Branch on Decision
+### 4e. Solution Decision
 
 #### AUTO_MERGE path:
 1. `git add -A && git commit -m "fix: resolve #N - <title>"`
@@ -267,7 +267,7 @@ solve.py
   ├─ Haiku (tool loop)             read files → write fix → run tests
   ├─ git diff                       capture proposed_diff
   ├─ evaluate_risk()                LOW / MEDIUM / HIGH / ESCALATE
-  └─ evaluate_autonomy()            AUTO_MERGE / HITL_REQUIRED / ESCALATE_ONLY
+  └─ Solution Decision              AUTO_MERGE / HITL_REQUIRED / ESCALATE_ONLY
     │
     ├─ ESCALATE_ONLY  ──▶ post escalation comment, stop
     │
