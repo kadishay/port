@@ -72,11 +72,25 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
         gh.post_comment(ctx.issue_number, _escalate_comment(ctx))
         return ctx
 
-    if decision == AutonomyDecision.AUTO_MERGE:
-        return _finish_and_open_pr(ctx, gh, diff)
+    # Commit fix now — before any HITL wait — so external git ops can't wipe uncommitted changes
+    _, commit_out, rc = run_shell(
+        f"git -C {ctx.repo_path} add -A && "
+        f"git -C {ctx.repo_path} commit -m 'fix: proposed fix for #{ctx.issue_number} — {ctx.issue_title[:50]}'"
+    )
+    if rc != 0:
+        msg = "⚠️ Fix agent ran but produced no file changes — no commit to push."
+        gh.post_comment(ctx.issue_number, msg)
+        print(f"[solve] #{ctx.issue_number} — {msg}", flush=True)
+        _abort_fix(ctx.repo_path, fix_branch)
+        return ctx
 
-    # HITL required
+    if decision == AutonomyDecision.AUTO_MERGE:
+        return _push_and_open_pr(ctx, gh)
+
+    # HITL required — notify both GitHub and Slack
     gh.post_comment(ctx.issue_number, _hitl_comment(ctx, diff, reasons))
+    _notify_hitl_slack(ctx, diff, reasons)
+
     try:
         approved = wait_for_approval(ctx, gh)
     except HITLTimeout:
@@ -89,7 +103,7 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
         _abort_fix(ctx.repo_path, fix_branch)
         return ctx
 
-    return _finish_and_open_pr(ctx, gh, diff)
+    return _push_and_open_pr(ctx, gh)
 
 
 def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
@@ -213,20 +227,12 @@ def _apply_fix(ctx: BugContext, tracker: CostTracker) -> None:
         messages.append({"role": "user", "content": tool_results})
 
 
-def _finish_and_open_pr(ctx: BugContext, gh: GitHubClient, diff: str) -> BugContext:
-    _, _, rc = run_shell(
-        f"git -C {ctx.repo_path} add -A && "
-        f"git -C {ctx.repo_path} commit -m 'fix: resolve #{ctx.issue_number} - {ctx.issue_title[:60]}'"
-    )
-    if rc != 0:
-        gh.post_comment(ctx.issue_number, "⚠️ Fix agent ran but produced no file changes — no commit to push.")
-        print(f"[solve] #{ctx.issue_number} — git commit returned rc={rc}, nothing to push", flush=True)
-        return ctx
+def _push_and_open_pr(ctx: BugContext, gh: GitHubClient) -> BugContext:
     run_shell(f"git -C {ctx.repo_path} push origin {ctx.fix_branch}")
 
     pr = gh.create_pr(
         title=f"fix: resolve #{ctx.issue_number} — {ctx.issue_title[:60]}",
-        body=_pr_body(ctx, diff),
+        body=_pr_body(ctx, ctx.proposed_diff),
         head=ctx.fix_branch,
     )
     ctx.pr_url = pr.get("html_url", "")
@@ -242,8 +248,28 @@ def _abort_fix(repo_path: str, branch: str) -> None:
     run_shell(f"git -C {repo_path} checkout main && git -C {repo_path} branch -D {branch}")
 
 
+def _notify_hitl_slack(ctx: BugContext, diff: str, reasons: list[str]) -> None:
+    if not os.environ.get("SLACK_BOT_TOKEN") or not ctx.slack_thread_ts:
+        return
+    from agent.slack_client import SlackClient
+    short_diff = diff[:1500] if diff else "(no diff)"
+    msg = (
+        f"🔧 *Fix ready for review — Issue #{ctx.issue_number}*\n"
+        f"*Root cause:* {ctx.root_cause[:200]}\n"
+        f"*Why HITL:* {'; '.join(reasons[:2])}\n\n"
+        f"```{short_diff}```\n\n"
+        f"Reply `approve` to merge or `reject` to abort (30 min timeout)."
+    )
+    SlackClient().post_to_thread(ctx.slack_thread_ts, msg)
+
+
 def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
     risk_info = f"**Risk level:** {ctx.risk_level.value}\n" if ctx.risk_level else ""
+    approval_note = (
+        "Reply `approve` or `reject` here **or** in the Slack `#bug-triage` thread — whichever fires first wins. Timeout: 30 minutes."
+        if os.environ.get("SLACK_APP_TOKEN")
+        else "Reply `/approve` to merge or `/reject` to abort. Timeout: 30 minutes."
+    )
     return (
         f"## 🔧 Proposed Fix for #{ctx.issue_number}\n\n"
         f"**Severity:** {ctx.severity.value} | **Confidence:** {ctx.confidence:.0%}\n\n"
@@ -251,11 +277,7 @@ def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
         f"**Root cause:** {ctx.root_cause}\n\n"
         f"**HITL required because:** {'; '.join(reasons)}\n\n"
         f"```diff\n{diff[:3000]}\n```\n\n"
-        + (
-            "Reply `approve` or `reject` in the **Slack `#bug-triage` thread** for this issue. Timeout: 30 minutes."
-            if os.environ.get("SLACK_APP_TOKEN")
-            else "Reply `/approve` to merge or `/reject` to abort. Timeout: 30 minutes."
-        )
+        f"{approval_note}"
     )
 
 
