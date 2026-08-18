@@ -9,6 +9,13 @@ class Severity(str, Enum):
     LOW = "LOW"
 
 
+class RiskLevel(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    ESCALATE = "ESCALATE"
+
+
 class AutonomyDecision(str, Enum):
     AUTO_MERGE = "AUTO_MERGE"
     HITL_REQUIRED = "HITL_REQUIRED"
@@ -26,6 +33,8 @@ class BugContext:
     severity: Severity = Severity.MEDIUM
     confidence: float = 0.0
     proposed_diff: str = ""
+    risk_level: RiskLevel = RiskLevel.MEDIUM
+    risk_reasons: list[str] = field(default_factory=list)
     autonomy_decision: AutonomyDecision = AutonomyDecision.HITL_REQUIRED
     autonomy_reasons: list[str] = field(default_factory=list)
     fix_branch: str = ""

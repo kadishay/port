@@ -144,8 +144,11 @@ def _abort_fix(repo_path: str, branch: str) -> None:
 
 
 def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
+    risk_info = f"**Risk level:** {ctx.risk_level}\n" if ctx.risk_level else ""
     return (
         f"## 🔧 Proposed Fix for #{ctx.issue_number}\n\n"
+        f"**Severity:** {ctx.severity} | **Confidence:** {ctx.confidence:.0%}\n\n"
+        f"{risk_info}"
         f"**Root cause:** {ctx.root_cause}\n\n"
         f"**HITL required because:** {'; '.join(reasons)}\n\n"
         f"```diff\n{diff[:3000]}\n```\n\n"
@@ -164,11 +167,13 @@ def _escalate_comment(ctx: BugContext) -> str:
 
 def _pr_body(ctx: BugContext, diff: str) -> str:
     auto = ctx.autonomy_decision == AutonomyDecision.AUTO_MERGE
+    risk_line = f"**Risk:** {ctx.risk_level} ({'; '.join(ctx.risk_reasons)})\n\n" if ctx.risk_level else ""
     return (
         f"Fixes #{ctx.issue_number}\n\n"
+        f"**Severity:** {ctx.severity} | **Confidence:** {ctx.confidence:.0%}\n\n"
+        f"{risk_line}"
         f"**Root cause:** {ctx.root_cause}\n\n"
-        f"**Confidence:** {ctx.confidence:.0%}\n\n"
-        f"**Merge decision:** {'Automatic (all autonomy criteria met)' if auto else 'Human approved via GitHub'}\n\n"
+        f"**Merge decision:** {'Automatic (LOW risk + criteria met)' if auto else 'Human approved via GitHub'}\n\n"
         "*Fix proposed by Claude Opus 4.8*"
     )
 

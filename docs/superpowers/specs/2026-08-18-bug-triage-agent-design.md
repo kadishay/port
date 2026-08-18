@@ -140,51 +140,64 @@ Slack replaces GitHub comment polling for all human interaction:
 
 ---
 
-## Autonomy Decision Matrix
+## Two Orthogonal Metrics
 
-The core question: when can the agent merge without human approval?
+**Severity** and **Risk** are distinct concepts that each drive a different decision:
 
-**Auto-merge when ALL of the following hold:**
+| Metric | Question it answers | Drives |
+|--------|-------------------|--------|
+| **Severity** | How critical is this bug to fix? | Whether and how urgently to attempt a fix |
+| **Risk** | How dangerous is the proposed fix? | Whether to auto-merge or require human approval |
 
-| Condition | Threshold |
-|-----------|-----------|
-| Severity | HIGH or lower (never auto-merge CRITICAL) |
-| Files changed | ≤ 2 files |
-| Lines changed | ≤ 30 lines |
-| Tests | All existing tests pass, no test files modified |
-| New dependencies | None introduced |
-| Model confidence | ≥ 0.85 (Opus reports this in structured output) |
-| Fix type | Pure correction of existing logic — no new behavior |
-
-**HITL required (propose, wait for human) when ANY of:**
-- Severity is CRITICAL (always alert human and also attempt a fix, but never auto-merge)
-- > 2 files changed
-- > 30 lines changed
-- Any test files modified
-- New imports or dependencies added
-- Confidence < 0.85
-- Fix introduces new behavior or business logic
-
-**Escalate to human only (no auto-fix attempt):**
-- Database schema changes (migration files touched)
-- Auth, permissions, or token handling changes
-- API contract changes (route signatures, response shapes)
-- Cross-service changes affecting multiple components
-
-**On CRITICAL bugs:** the agent does _both_ — it alerts the human immediately AND starts working on a fix. It posts the proposed fix for human review but never merges it autonomously.
-
-Both demo bugs (HIGH, 1 file, 1 line) qualify for auto-merge.
+A bug can be high-severity + low-risk (a one-line typo in a core function → fix it immediately, merge automatically) or low-severity + high-risk (a cosmetic tweak that touches auth middleware → not urgent, but needs human eyes). These must be evaluated independently.
 
 ---
 
-## Severity Classification Rubric
+## Severity Classification
+
+Drives triage routing and urgency.
 
 | Severity | Criteria | Triage action | Fix action |
 |----------|----------|--------------|------------|
-| CRITICAL | Data loss, auth bypass, crash on startup | Alert human immediately (Slack + GitHub) | Propose fix → HITL always |
-| HIGH | Wrong data shown, core feature broken | Post triage comment | Apply autonomy matrix |
-| MEDIUM | Degraded UX, edge case error | Post triage comment | Label + assign human, no auto-fix |
+| CRITICAL | Data loss, auth bypass, crash on startup | Alert human immediately (Slack + GitHub) | Attempt fix → HITL always |
+| HIGH | Wrong data shown, core feature broken | Post triage comment | Evaluate risk → auto-merge or HITL |
+| MEDIUM | Degraded UX, edge case error | Post triage comment | Evaluate risk → auto-merge or HITL |
 | LOW | Visual glitch, non-blocking | Label only | No action |
+
+---
+
+## Risk Classification
+
+Evaluated by the Solve Agent after the fix is proposed. Drives the merge decision.
+
+| Risk | Criteria | Decision |
+|------|----------|----------|
+| **LOW** | ≤ 2 files, ≤ 15 lines, pure logic correction, confidence ≥ 0.85, no new deps, tests pass | AUTO_MERGE |
+| **MEDIUM** | 3–5 files, 16–50 lines, some refactoring, confidence 0.70–0.84 | HITL_REQUIRED |
+| **HIGH** | > 5 files, > 50 lines, new behavior, confidence < 0.70, test files modified | HITL_REQUIRED |
+| **ESCALATE** | Auth/permissions, DB migrations, API contract changes, session tokens | ESCALATE_ONLY (no auto-fix) |
+
+**Risk is independent of severity.** A CRITICAL bug can have LOW risk (and still requires HITL because of severity). A LOW severity bug can have LOW risk and be auto-merged.
+
+---
+
+## Autonomy Decision Matrix
+
+Combines both metrics:
+
+```
+Severity = CRITICAL  →  HITL always (regardless of risk)
+Severity = HIGH/MED  →  evaluate risk:
+    Risk = LOW       →  AUTO_MERGE
+    Risk = MEDIUM    →  HITL_REQUIRED
+    Risk = HIGH      →  HITL_REQUIRED
+    Risk = ESCALATE  →  ESCALATE_ONLY
+Severity = LOW       →  label only, no fix
+```
+
+**On CRITICAL bugs:** the agent does _both_ — alerts human immediately AND starts working on a fix. Posts the proposed fix for human review but never merges automatically, even if risk is LOW.
+
+Both demo bugs (HIGH severity, 1 file, 1 line, confidence ≥ 0.85) → LOW risk → AUTO_MERGE.
 
 ---
 
