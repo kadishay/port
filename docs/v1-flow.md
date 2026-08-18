@@ -89,6 +89,10 @@ Haiku is cheap and fast for this structured extraction task.
 
 **Output:** `ctx.reproduction_log` — raw stdout/stderr from all tool calls, plus the model's final summary of what it observed.
 
+**V1 limitation — frontend bugs can't be truly reproduced here.** `run_shell` and `read_file` only reach the backend API and the source tree. For a frontend bug like the kanban condition inversion, there is no API endpoint that exposes the wrong behaviour — Haiku ends up reading the `.ts` source file and reasoning about the code instead of executing it. The reproduction log for frontend bugs is a code inspection, not a real reproduction.
+
+> **Phase 2:** A Playwright (headless Chromium) tool will be added to this step. For issues classified as frontend bugs, the agent will drive the Vikunja UI — navigate to the relevant view, perform the reported steps, and capture a screenshot as proof. The same Playwright script will re-run after the fix is applied to verify the bug is gone before the PR is opened. Requires the frontend dev server (`pnpm dev`, port 4173) to be running.
+
 ### 2c. "Not a Bug" Check (Haiku + tool loop)
 
 **Model:** `claude-haiku-4-5` with tools  

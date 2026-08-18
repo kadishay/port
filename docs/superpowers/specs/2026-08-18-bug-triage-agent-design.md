@@ -30,11 +30,16 @@ An agentic workflow that monitors a GitHub repository for bug issues, reproduces
 - Solve: propose → autonomy decision → apply → test → PR (or HITL gate)
 - Two pre-introduced bugs: 1 backend (Go), 1 frontend (Vue 3)
 
-**Phase 2 (Slack):**
+**Phase 2 (Slack + Frontend Reproduction):**
 - Agent posts status updates to Slack channel at every major step
 - Human escalation happens in Slack, not GitHub comments
 - Humans can respond in Slack to approve/reject fixes or ask questions
 - Autonomy policy defined explicitly (see Autonomy Decision Matrix)
+- **Playwright integration for frontend bug reproduction and verification:**
+  - Phase 1 can only reproduce backend bugs via API calls; frontend bugs are inspected via source code, not actually executed
+  - Phase 2 adds a Playwright (headless Chromium) driver as a triage tool — the agent can navigate the Vikunja UI, perform the steps described in the issue, take a screenshot as proof of the bug, and attach it to the GitHub triage comment
+  - After the fix is applied, Playwright re-runs the same steps to verify the bug is gone before the PR is opened
+  - Requires the frontend dev server (`pnpm dev`, port 4173) to be running alongside the backend
 
 **Phase 3 (Optional):**
 - Move agent + Vikunja to cloud (Fly.io / Railway / Docker Compose on a VPS)
