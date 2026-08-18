@@ -165,20 +165,24 @@ def _apply_fix(ctx: BugContext, tracker: CostTracker) -> None:
     messages = [{
         "role": "user",
         "content": (
-            f"Fix this Vikunja bug with the MINIMAL possible change — one line or value, not a refactor.\n\n"
+            f"Fix this Vikunja bug by restoring the ONE value that was changed to introduce the bug.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Root cause: {ctx.root_cause}\n"
             f"{buggy_hint}"
             f"Suspected file(s): {affected}\n"
             f"Repo: {ctx.repo_path}\n\n"
-            "Steps (at most 5 tool calls total):\n"
-            "1) run_shell: grep for the buggy pattern or function name in "
-            f"{ctx.repo_path}/pkg/models/ and {ctx.repo_path}/frontend/src/ "
-            "(exclude *_test* and *swagger*) to confirm the exact file and line.\n"
-            "2) read_file the confirmed file.\n"
-            "3) write_file with ONLY the minimal fix — change the one wrong value or line. "
-            "Do NOT add new functions, do NOT refactor unrelated code.\n"
-            "4) run_shell to build/test. Stop after that."
+            "Steps (at most 6 tool calls total):\n"
+            "1) run_shell: find the exact file by grepping for the buggy pattern "
+            f"in {ctx.repo_path}/pkg/models/ and {ctx.repo_path}/frontend/src/ "
+            "(exclude *_test* and *swagger*).\n"
+            "2) run_shell: check git history to find what the original value was BEFORE the bug:\n"
+            f"   git -C {ctx.repo_path} log --oneline -5 -- <file>\n"
+            f"   git -C {ctx.repo_path} show <prev-sha>:<relative-file-path> | grep -A2 -B2 '<buggy_term>'\n"
+            "3) read_file the confirmed file.\n"
+            "4) write_file — change EXACTLY ONE value: replace the buggy value with the original "
+            "value from git history. Touch nothing else. No new functions, no reformatting, "
+            "no 'while you're here' fixes to nearby lines.\n"
+            "5) run_shell to build/test. Stop after that."
         ),
     }]
 
