@@ -200,26 +200,41 @@ risk = MEDIUM or HIGH      →  HITL_REQUIRED
 
 ### 4e. Solution Decision
 
-#### AUTO_MERGE path:
+The output of `evaluate_autonomy()` routes to one of three paths:
+
+#### ESCALATE_ONLY
+**Selected when:** the diff contains an escalation keyword (`auth token`, `auth middleware`, `session token`, `migration`, `schema alter`). This check runs before any other rule — if the keyword is present, the path is forced regardless of severity, risk level, or confidence.
+
+**What happens:**
+1. Posts a comment explaining the fix touches auth/migrations/API contracts and will not be applied automatically.
+2. No code is committed. No branch is pushed. The dirty working tree is left as-is.
+
+---
+
+#### AUTO_MERGE
+**Selected when:** risk level is LOW (rules + Haiku both agree) AND severity is not CRITICAL.
+
+**What happens:**
 1. `git add -A && git commit -m "fix: resolve #N - <title>"`
 2. `git push origin fix/issue-N`
-3. `gh.create_pr(...)` — opens a PR via GitHub API
-4. Posts success comment to issue: `✅ Fix applied automatically. PR: <url>`
+3. `gh.create_pr(...)` — opens a PR via the GitHub API
+4. Posts a success comment on the issue with the PR link
 
-#### HITL_REQUIRED path:
-1. Posts a comment to the issue with:
-   - Severity + confidence
-   - Risk level + risk reasons
-   - Full diff (up to 3000 chars)
-   - Instructions: reply `/approve` or `/reject`
-2. `wait_for_approval()` starts polling GitHub comments every 60 seconds (timeout: 30 minutes).
-3. If `/approve` found → proceeds to commit + PR (same as AUTO_MERGE path above).
-4. If `/reject` found → deletes the branch, posts rejection acknowledgement.
-5. If timeout → posts timeout notice, deletes the branch.
+No human is involved at any point.
 
-#### ESCALATE_ONLY path:
-1. Posts an escalation comment explaining the fix touches auth/migrations/API contracts.
-2. No code changes are committed. No branch is pushed.
+---
+
+#### HITL_REQUIRED
+**Selected when:** any of the following:
+- Risk level is MEDIUM or HIGH (rules or Haiku flagged the fix as dangerous)
+- Severity is CRITICAL (always requires human sign-off, even on LOW risk fixes)
+
+**What happens:**
+1. Posts a comment to the issue containing severity, confidence, risk level, risk reasons, and the full diff (up to 3000 chars), with instructions to reply `/approve` or `/reject`
+2. `wait_for_approval()` polls GitHub comments every 60 seconds for up to 30 minutes
+3. `/approve` → proceeds to commit + push + PR (same as AUTO_MERGE above)
+4. `/reject` → deletes the fix branch, posts a rejection acknowledgement
+5. Timeout → deletes the fix branch, posts a timeout notice
 
 ---
 
