@@ -210,10 +210,14 @@ def _apply_fix(ctx: BugContext, tracker: CostTracker) -> None:
 
 
 def _finish_and_open_pr(ctx: BugContext, gh: GitHubClient, diff: str) -> BugContext:
-    run_shell(
+    _, _, rc = run_shell(
         f"git -C {ctx.repo_path} add -A && "
         f"git -C {ctx.repo_path} commit -m 'fix: resolve #{ctx.issue_number} - {ctx.issue_title[:60]}'"
     )
+    if rc != 0:
+        gh.post_comment(ctx.issue_number, "⚠️ Fix agent ran but produced no file changes — no commit to push.")
+        print(f"[solve] #{ctx.issue_number} — git commit returned rc={rc}, nothing to push", flush=True)
+        return ctx
     run_shell(f"git -C {ctx.repo_path} push origin {ctx.fix_branch}")
 
     pr = gh.create_pr(

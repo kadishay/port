@@ -49,7 +49,8 @@ class GitHubClient:
             headers=self._headers,
             json={"title": title, "body": body, "head": head, "base": base},
         )
-        r.raise_for_status()
+        if not r.ok:
+            raise RuntimeError(f"GitHub PR creation failed {r.status_code}: {r.text}")
         return r.json()
 
     def get_commit_author_login(self, commit_sha: str) -> str | None:
