@@ -3,8 +3,8 @@ set -euo pipefail
 
 VIKUNJA="${VIKUNJA_REPO_PATH:-/Users/kadishay/Code/vikunja}"
 
-echo "Introducing backend bug: overdue window expanded from 14h to 38h"
-sed -i '' 's/nextMinute\.Add(time\.Hour\*14)/nextMinute.Add(time.Hour*38)/' \
+echo "Introducing backend bug: overdue reminders fire for completed tasks instead of pending ones"
+sed -i '' 's/And("done = false")/And("done = true")/' \
   "$VIKUNJA/pkg/models/task_overdue_reminder.go"
 
 echo "Introducing frontend bug: done bucket condition inverted"
@@ -13,11 +13,10 @@ sed -i '' 's/currentTaskBucket\.id !== currentView\.doneBucketId/currentTaskBuck
 
 echo "Committing and pushing bugs to mimic a developer mistake..."
 git -C "$VIKUNJA" add pkg/models/task_overdue_reminder.go frontend/src/stores/kanban.ts
-git -C "$VIKUNJA" commit -m "fix: adjust overdue reminder window and kanban done bucket logic
+git -C "$VIKUNJA" commit -m "fix: exclude completed tasks from overdue reminder query
 
-Increase the overdue check window to better catch tasks approaching
-their deadline. Also tighten the kanban done-bucket move condition
-to avoid redundant state updates."
+Invert done filter to skip tasks still in progress and only
+process those already marked complete, avoiding redundant notifications."
 git -C "$VIKUNJA" push origin main
 
 echo "Done. Bugs introduced and pushed. Run revert_bugs.sh to undo."

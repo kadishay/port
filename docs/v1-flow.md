@@ -403,10 +403,10 @@ GitHub webhook must be configured at `kadishay/vikunja → Settings → Webhooks
 
 ---
 
-### Demo Bug 1 — Backend (Go): Overdue Window Too Large
+### Demo Bug 1 — Backend (Go): Reminders Fire for Completed Tasks
 
 **What the bug does:**  
-`pkg/models/task_overdue_reminder.go` uses `time.Hour*38` instead of `time.Hour*14`. Tasks due in the next 38 hours are incorrectly flagged as overdue.
+`pkg/models/task_overdue_reminder.go` line 43 uses `And("done = true")` instead of `And("done = false")`. The overdue reminder cron sends emails for tasks already completed and silently skips genuinely overdue pending tasks.
 
 **Step 1 — Introduce the bug:**
 ```bash
@@ -419,38 +419,38 @@ bash bugs/introduce_bugs.sh
 
 Title:
 ```
-Getting overdue reminder emails for tasks that aren't due yet
+Getting overdue reminder emails for tasks I've already completed
 ```
 
 Body:
 ```
 ## Description
-I'm receiving overdue reminder emails for tasks that still have plenty of time left.
-This started happening recently — reminders that used to arrive when a task was actually
-late are now arriving a day or more early.
+I keep receiving overdue reminder emails for tasks that I've already marked as done.
+At the same time, tasks that are genuinely overdue and still open don't seem to be
+triggering any reminders.
 
 ## Reproduction
-1. Create a task due tomorrow
-2. Wait for the overdue reminder job to run (or check the overdue task list via the API)
-3. Expected: task is NOT in the overdue list
-4. Actual: task appears as overdue and triggers a reminder email
+1. Mark a task as done
+2. Wait for the overdue reminder job to run
+3. Expected: no reminder for completed tasks; reminders for pending overdue tasks
+4. Actual: reminder arrives for the completed task; pending overdue tasks are silent
 ```
 
 **What the agent does (automatically, ~2–3 minutes):**
 
 1. Webhook fires → agent receives the issue
 2. **Triage:**
-   - Haiku extracts the curl reproduction command from the issue body
-   - Haiku runs the curl against `:3456`, reads `task_overdue_reminder.go`
-   - Haiku identifies root cause: `time.Hour*38` should be `time.Hour*14`, confidence ~0.90+
+   - Haiku extracts reproduction steps from the issue body
+   - Haiku searches by filename: `find pkg/models -name '*reminder*'` → `task_overdue_reminder.go`
+   - Haiku reads the file, identifies `And("done = true")` as the bug
    - Haiku classifies: **HIGH** severity
    - Triage comment posted to GitHub issue
 3. **Solve:**
-   - Haiku reads the file and writes the fix (`38` → `14`)
+   - Haiku checks git history to confirm original value was `done = false`
+   - Writes the 1-line fix, commits immediately to `fix/issue-N`
    - Risk evaluated: 1 file, 1 line, confidence ≥ 0.85 → **LOW risk**
    - Decision: **AUTO_MERGE**
-   - Commits to `fix/issue-N`, pushes, opens PR
-   - Success comment posted to issue with PR link
+   - Pushes branch, opens PR, posts success comment with PR link
 
 **To reset:**
 ```bash

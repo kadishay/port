@@ -57,26 +57,20 @@ Orchestrator (Python)
 
 Both bugs have exact file locations and diffs captured in the implementation plan.
 
-### Bug 1: Backend (Go) — Overdue Window Too Large
+### Bug 1: Backend (Go) — Reminders Fire for Completed Tasks
 
-**File:** `/Users/kadishay/Code/vikunja/pkg/models/task_overdue_reminder.go:41`
+**File:** `/Users/kadishay/Code/vikunja/pkg/models/task_overdue_reminder.go:43`
 
 **Change:**
 ```go
-// Buggy: 38 hours instead of 14
-nextMinute.Add(time.Hour*38).Format(dbTimeFormat)
+// Buggy: queries completed tasks instead of pending ones
+And("done = true")
 
 // Fixed:
-nextMinute.Add(time.Hour*14).Format(dbTimeFormat)
+And("done = false")
 ```
 
-**Effect:** Tasks due in the next 38 hours (including tomorrow) are erroneously flagged as overdue, triggering unnecessary reminder emails/webhooks.
-
-**Reproduction:** 
-```bash
-curl http://localhost:3456/api/v1/tasks?filter=due_date<now+38h
-# Expected: tasks due ≤14h shown; Actual: tasks due ≤38h shown
-```
+**Effect:** The overdue reminder cron (runs every minute) sends emails for tasks the user has already completed, while genuinely overdue pending tasks receive no reminder at all.
 
 **Severity:** HIGH (wrong data shown, core feature broken)
 
