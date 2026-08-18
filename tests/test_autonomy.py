@@ -98,15 +98,15 @@ def test_auto_merge_medium_severity_low_risk():
     assert decision == AutonomyDecision.AUTO_MERGE
 
 
+def test_auto_merge_low_severity_low_risk():
+    decision, _ = evaluate_autonomy(_ctx(severity=Severity.LOW, confidence=0.90), SMALL_DIFF)
+    assert decision == AutonomyDecision.AUTO_MERGE
+
+
 def test_hitl_for_critical_even_low_risk():
     decision, reasons = evaluate_autonomy(_ctx(severity=Severity.CRITICAL, confidence=0.90), SMALL_DIFF)
     assert decision == AutonomyDecision.HITL_REQUIRED
     assert any("CRITICAL" in r for r in reasons)
-
-
-def test_hitl_for_low_severity():
-    decision, _ = evaluate_autonomy(_ctx(severity=Severity.LOW, confidence=0.90), SMALL_DIFF)
-    assert decision == AutonomyDecision.HITL_REQUIRED
 
 
 def test_hitl_for_medium_risk():

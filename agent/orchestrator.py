@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from agent.models import BugContext, Severity
+from agent.models import BugContext
 from agent.tools.github_tools import GitHubClient
 from agent.triage import run_triage
 from agent.solve import run_solve
@@ -28,16 +28,13 @@ def run_pipeline(issue_number: int) -> BugContext:
         f"Root cause: {ctx.root_cause[:200]}"
     ))
 
-    if ctx.severity in (Severity.CRITICAL, Severity.HIGH):
-        _notify_thread(ctx, f"🔧 Starting automated fix for #{issue_number}...")
-        ctx = run_solve(ctx, gh)
-        if ctx.pr_url:
-            _notify_thread(ctx, f"✅ PR opened: {ctx.pr_url}")
-        else:
-            _notify_thread(ctx, f"⚠️ Fix aborted or rejected. Decision: {ctx.autonomy_decision}")
+    gh.add_label(issue_number, f"severity:{ctx.severity.lower()}")
+    _notify_thread(ctx, f"🔧 Starting automated fix for #{issue_number}...")
+    ctx = run_solve(ctx, gh)
+    if ctx.pr_url:
+        _notify_thread(ctx, f"✅ PR opened: {ctx.pr_url}")
     else:
-        gh.add_label(issue_number, f"severity:{ctx.severity.lower()}")
-        _notify_thread(ctx, f"🏷️ {ctx.severity} severity — labelled, no auto-fix")
+        _notify_thread(ctx, f"⚠️ Fix aborted or rejected. Decision: {ctx.autonomy_decision}")
 
     return ctx
 

@@ -61,17 +61,13 @@ def evaluate_autonomy(ctx: BugContext, diff: str) -> tuple[AutonomyDecision, lis
     if risk == RiskLevel.ESCALATE:
         return AutonomyDecision.ESCALATE_ONLY, reasons
 
-    if ctx.severity == Severity.LOW:
-        reasons.append("LOW severity — no auto-fix")
-        return AutonomyDecision.HITL_REQUIRED, reasons
-
     if ctx.severity == Severity.CRITICAL:
         reasons.append("CRITICAL severity — HITL always required regardless of risk")
         return AutonomyDecision.HITL_REQUIRED, reasons
 
-    # HIGH or MEDIUM severity: risk drives the merge decision
+    # Risk is the sole driver of the merge decision
     if risk == RiskLevel.LOW:
-        reasons.append("LOW risk + HIGH/MEDIUM severity — auto-merge")
+        reasons.append("LOW risk — auto-merge")
         return AutonomyDecision.AUTO_MERGE, reasons
 
     reasons.append(f"{risk} risk — HITL required")
