@@ -107,54 +107,8 @@ def _reproduce(ctx: BugContext, steps: str) -> str:
 
 
 def _check_not_a_bug(ctx: BugContext) -> None:
-    messages = [{
-        "role": "user",
-        "content": (
-            f"A user filed this issue against Vikunja (a task manager):\n\n"
-            f"Title: {ctx.issue_title}\n\n"
-            f"Body: {ctx.issue_body}\n\n"
-            f"Reproduction result:\n{ctx.reproduction_log[:2000]}\n\n"
-            "Check the Vikunja documentation and source code to determine whether the "
-            "reported behaviour is actually the intended, documented behaviour.\n"
-            f"Repo path: {ctx.repo_path}\n\n"
-            "Read any relevant README, docs/, or changelog files. "
-            'Respond with JSON only: {{"not_a_bug": true/false, "reason": "one sentence"}}'
-        ),
-    }]
-
-    while True:
-        response = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=1024,
-            tools=_TRIAGE_TOOLS,
-            messages=messages,
-        )
-
-        if response.stop_reason == "end_turn":
-            text = next((b.text for b in response.content if b.type == "text"), None)
-            if text:
-                cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                try:
-                    data = json.loads(cleaned)
-                    if data.get("not_a_bug"):
-                        ctx.not_a_bug = True
-                        ctx.not_a_bug_reason = data.get("reason", "")
-                except (json.JSONDecodeError, KeyError):
-                    pass
-            break
-
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                result = _execute_tool(block.name, block.input, ctx.repo_path)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                })
-
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": tool_results})
+    # TODO: replace with real documentation lookup (vikunja.io/docs or scraped local copy)
+    ctx.not_a_bug = False
 
 
 def _post_not_a_bug_comment(ctx: BugContext, gh: GitHubClient) -> None:
