@@ -32,10 +32,11 @@ async def github_webhook(request: Request) -> Response:
         return Response(content="Ignored", status_code=200)
 
     payload = json.loads(body)
-    if payload.get("action") != "opened":
-        return Response(content="Ignored (not opened)", status_code=200)
+    if payload.get("action") not in ("opened", "reopened"):
+        return Response(content="Ignored (not opened/reopened)", status_code=200)
 
     issue_number = payload["issue"]["number"]
-    print(f"[webhook] Received issue #{issue_number} — dispatching pipeline")
+    action = payload.get("action")
+    print(f"[webhook] Received issue #{issue_number} ({action}) — dispatching pipeline")
     enqueue_issue(issue_number)
     return Response(content="Accepted", status_code=202)

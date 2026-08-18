@@ -46,10 +46,10 @@ Orchestrator (Python)
 ```
 
 **Models used:**
-- Haiku 4.5 ($1/$5 per MTok): cheap parsing, classification, HITL polling
-- Opus 4.8 ($5/$25 per MTok): root cause analysis, fix proposal (thinking enabled)
+- Haiku 4.5 ($1/$5 per MTok): all steps — parsing, reproduction, root cause (with read_file, capped at 5 iterations), classification, fix proposal, HITL polling
+- Opus 4.8: not used (Haiku sufficient for single-file logic bugs at 5× lower cost and ~5× faster)
 
-**Cost per bug:** ~$0.20 total
+**Cost per bug:** ~$0.05–0.10 total
 
 ---
 

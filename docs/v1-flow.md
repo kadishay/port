@@ -122,17 +122,17 @@ If `not_a_bug = true`:
 
 This check runs before Opus to avoid spending expensive tokens on issues that aren't actually bugs.
 
-### 2d. Root Cause Analysis (Opus)
+### 2d. Root Cause Analysis (Haiku + read_file tools)
 
-**Model:** `claude-opus-4-8` with adaptive thinking  
+**Model:** `claude-haiku-4-5` with tools (capped at 5 iterations)
 **Input:** Issue title + reproduction log  
 **Output:** JSON `{"root_cause": "...", "confidence": 0.XX, "files": [...], "buggy_pattern": "..."}`
 
-Opus reads what the reproduction produced and explains *why* the bug happens — not just *what* happened. Thinking is enabled (`adaptive`) so it can reason through the code before committing to an answer. The confidence score (0.0–1.0) reflects how certain Opus is about its diagnosis. The `files` and `buggy_pattern` fields are used by the next step to trace authorship.
+Haiku reads the most relevant source file(s) via `read_file` (up to 2 reads), then returns a JSON diagnosis. For single-file logic bugs the root cause is apparent from the code — deep reasoning isn't needed. Haiku completes this in ~5–10s vs 30–60s+ for Opus with adaptive thinking, at ~5× lower cost. The confidence score (0.0–1.0) reflects how certain Haiku is. The `files` and `buggy_pattern` fields are used by the next step to trace authorship.
 
 ```
-ctx.root_cause    = "The overdue window uses time.Hour*38 instead of time.Hour*14..."
-ctx.confidence    = 0.92
+ctx.root_cause     = "The overdue window uses time.Hour*38 instead of time.Hour*14..."
+ctx.confidence     = 0.92
 ctx.affected_files = ["pkg/models/task_overdue_reminder.go"]
 ctx.buggy_pattern  = "time.Hour*38"
 ```

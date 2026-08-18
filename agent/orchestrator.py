@@ -9,7 +9,32 @@ from agent.solve import run_solve
 from agent.cost_tracker import CostTracker
 
 
+def _refresh_vikunja_token() -> None:
+    import json, subprocess
+    username = os.environ.get("VIKUNJA_USERNAME", "")
+    password = os.environ.get("VIKUNJA_PASSWORD", "")
+    api_base = os.environ.get("VIKUNJA_API_BASE", "http://localhost:3456")
+    if not username or not password:
+        return
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-X", "POST", f"{api_base}/api/v1/login",
+             "-H", "Content-Type: application/json",
+             "-d", json.dumps({"username": username, "password": password})],
+            capture_output=True, text=True, timeout=10,
+        )
+        token = json.loads(result.stdout).get("token", "")
+        if token:
+            os.environ["VIKUNJA_API_TOKEN"] = token
+            print("[token] Refreshed Vikunja API token", flush=True)
+        else:
+            print(f"[token] Refresh failed: {result.stdout[:200]}", flush=True)
+    except Exception as e:
+        print(f"[token] Failed to refresh token: {e}", flush=True)
+
+
 def run_pipeline(issue_number: int) -> BugContext:
+    _refresh_vikunja_token()
     gh = GitHubClient()
     issue = gh.get_issue(issue_number)
 
@@ -49,7 +74,9 @@ def run_pipeline(issue_number: int) -> BugContext:
     else:
         _notify_thread(ctx, f"⚠️ Fix aborted or rejected. Decision: {ctx.autonomy_decision.value}")
 
-    _notify_thread(ctx, tracker.summary())
+    cost_summary = tracker.summary()
+    print(cost_summary, flush=True)
+    _notify_thread(ctx, cost_summary)
 
     return ctx
 

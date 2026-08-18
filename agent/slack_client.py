@@ -35,9 +35,9 @@ class SlackClient:
             if event.get("type") != "message" or event.get("thread_ts") != thread_ts:
                 return
             text = event.get("text", "").strip().lower()
-            if text.startswith("/approve"):
+            if text.startswith("approve") or text.startswith("/approve"):
                 self._approvals[thread_ts] = True
-            elif text.startswith("/reject"):
+            elif text.startswith("reject") or text.startswith("/reject"):
                 self._approvals[thread_ts] = False
 
         socket.socket_mode_request_listeners.append(handle)

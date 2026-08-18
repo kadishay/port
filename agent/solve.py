@@ -1,3 +1,4 @@
+import os
 import anthropic
 from agent.models import BugContext, AutonomyDecision
 from agent.cost_tracker import CostTracker
@@ -53,12 +54,16 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
     _create_fix_branch(ctx.repo_path, fix_branch)
     ctx.fix_branch = fix_branch
 
+    print(f"[solve] #{ctx.issue_number} — applying fix", flush=True)
     _apply_fix(ctx, tracker)
+
+    print(f"[solve] #{ctx.issue_number} — verifying fix", flush=True)
     _verify_fix(ctx, tracker)
 
     diff = git_diff(ctx.repo_path)
     ctx.proposed_diff = diff
 
+    print(f"[solve] #{ctx.issue_number} — evaluating autonomy", flush=True)
     decision, reasons = evaluate_autonomy(ctx, diff)
     ctx.autonomy_decision = decision
     ctx.autonomy_reasons = reasons
@@ -152,18 +157,22 @@ def _execute_browser_tool(name: str, inputs: dict) -> str:
 
 
 def _apply_fix(ctx: BugContext, tracker: CostTracker) -> None:
+    affected = ", ".join(ctx.affected_files) if ctx.affected_files else "unknown"
     messages = [{
         "role": "user",
         "content": (
-            f"Fix this Vikunja bug. Read the relevant files and apply the minimal change.\n\n"
+            f"Fix this Vikunja bug in at most 5 tool calls total, then stop.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Root cause: {ctx.root_cause}\n"
+            f"Affected file(s): {affected}\n"
             f"Repo: {ctx.repo_path}\n\n"
-            "After applying the fix, run the relevant tests to verify it works."
+            "Steps: 1) read_file the affected file, 2) write_file with the fix, "
+            "3) run_shell to verify tests pass. Stop after that."
         ),
     }]
 
-    while True:
+    for iteration in range(8):
+        print(f"[solve] #{ctx.issue_number} — apply_fix iteration {iteration + 1}", flush=True)
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=8192,
@@ -223,7 +232,11 @@ def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
         f"**Root cause:** {ctx.root_cause}\n\n"
         f"**HITL required because:** {'; '.join(reasons)}\n\n"
         f"```diff\n{diff[:3000]}\n```\n\n"
-        "Reply `/approve` to merge or `/reject` to abort. Timeout: 30 minutes."
+        + (
+            "Reply `approve` or `reject` in the **Slack `#bug-triage` thread** for this issue. Timeout: 30 minutes."
+            if os.environ.get("SLACK_APP_TOKEN")
+            else "Reply `/approve` to merge or `/reject` to abort. Timeout: 30 minutes."
+        )
     )
 
 

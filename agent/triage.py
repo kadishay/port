@@ -14,6 +14,17 @@ from agent.cost_tracker import CostTracker
 
 client = anthropic.Anthropic()
 
+
+def _extract_json(text: str) -> dict:
+    import re
+    # Try to find a JSON object in the text
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        return json.loads(match.group())
+    # Fallback: strip markdown fences and parse
+    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return json.loads(cleaned)
+
 _TRIAGE_TOOLS = [
     {
         "name": "run_shell",
@@ -40,7 +51,10 @@ _TRIAGE_TOOLS = [
 
 
 def run_triage(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugContext:
+    print(f"[triage] #{ctx.issue_number} — parsing reproduction steps", flush=True)
     ctx.reproduction_steps = _parse_reproduction_steps(ctx, tracker)
+
+    print(f"[triage] #{ctx.issue_number} — reproducing bug", flush=True)
     ctx.reproduction_log = _reproduce(ctx, ctx.reproduction_steps, tracker)
 
     _check_not_a_bug(ctx)
@@ -48,8 +62,16 @@ def run_triage(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCo
         _post_not_a_bug_comment(ctx, gh)
         return ctx
 
+    import time as _time
+    print(f"[triage] #{ctx.issue_number} — Root cause analysis", flush=True)
+    _t0 = _time.time()
     ctx.root_cause, ctx.confidence, ctx.affected_files, ctx.buggy_pattern = _analyze_root_cause(ctx, tracker)
+    print(f"[triage] #{ctx.issue_number} — Opus root cause done in {_time.time() - _t0:.1f}s", flush=True)
+
+    print(f"[triage] #{ctx.issue_number} — finding relevant people", flush=True)
     _find_relevant_people(ctx, gh)
+
+    print(f"[triage] #{ctx.issue_number} — classifying severity", flush=True)
     ctx.severity = _classify_severity(ctx, tracker)
     _post_triage_comment(ctx, gh)
     return ctx
@@ -99,24 +121,29 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
     messages = [{
         "role": "user",
         "content": (
-            f"Reproduce this bug by running these steps against the Vikunja instance.\n\n"
+            f"Investigate this bug in at most 4 tool calls total, then stop.\n\n"
+            f"Issue: {ctx.issue_title}\n"
             f"Steps:\n{steps}\n\n"
             f"Vikunja repo: {ctx.repo_path}\n"
             f"Vikunja API: {os.environ.get('VIKUNJA_API_BASE', 'http://localhost:3456')}\n"
-            f"API auth header for all curl commands: {auth_header}\n\n"
+            f"API auth header: {auth_header}\n\n"
             "RULES:\n"
-            "- For backend/API bugs: use ONLY run_shell with curl (include the auth header above). "
-            "Do NOT use browser tools for backend bugs.\n"
-            "- For UI/frontend bugs: use the browser_* tools to drive the frontend. "
+            "- Do NOT try to create new tasks or users — use existing data.\n"
+            "- macOS date syntax: use $(date -v+1d +%s) for 'tomorrow', NOT date -d.\n"
+            "- For backend bugs: use run_shell (curl with auth header) AND read_file on the "
+            "most relevant source file in the repo. Do NOT use browser tools.\n"
+            "- For UI/frontend bugs: use the browser_* tools. "
             f"{login_instruction}"
-            "After demonstrating the bug, take a browser_screenshot with a descriptive filename.\n"
-            "When done, summarize what you observed."
+            "Take a browser_screenshot after demonstrating the bug.\n"
+            "- Stop after 4 tool calls. Summarize what you observed."
         ),
     }]
     log_parts: list[str] = []
     screenshot_paths: list[str] = []
+    max_iterations = 5
 
-    while True:
+    for iteration in range(max_iterations):
+        print(f"[triage] #{ctx.issue_number} — reproduce iteration {iteration + 1}", flush=True)
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=4096,
@@ -144,6 +171,9 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
+    else:
+        print(f"[triage] #{ctx.issue_number} — reproduce hit max iterations ({max_iterations}), stopping", flush=True)
+        log_parts.append(f"[truncated after {max_iterations} tool iterations]")
 
     close_browser()
     if screenshot_paths:
@@ -170,28 +200,88 @@ def _post_not_a_bug_comment(ctx: BugContext, gh: GitHubClient) -> None:
     gh.add_label(ctx.issue_number, "not-a-bug")
 
 
+_ROOT_CAUSE_TOOLS = [
+    {
+        "name": "read_file",
+        "description": "Read a source file from the Vikunja repo to inspect the code.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Absolute path to the file"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "run_shell",
+        "description": "Run a shell command to search for relevant source files (grep, find). Use to locate the buggy file before reading it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
+    },
+]
+
+
 def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, float, list[str], str]:
-    response = client.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=2048,
-        thinking={"type": "adaptive"},
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Analyze this Vikunja bug. Identify the root cause and your confidence (0.0–1.0).\n\n"
-                f"Issue: {ctx.issue_title}\n\n"
-                f"Reproduction log:\n{ctx.reproduction_log}\n\n"
-                "Respond with JSON only:\n"
-                '{"root_cause": "...", "confidence": 0.XX, '
-                '"files": ["relative/path/to/file.go"], '
-                '"buggy_pattern": "exact string that is wrong in the source"}'
-            ),
-        }],
-    )
-    tracker.record(response.model, response.usage)
-    text = next(b.text for b in response.content if b.type == "text")
-    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(cleaned)
+    # Haiku is fast (~5-10s) and sufficient for single-file logic bugs.
+    # Opus was 30-60s+ with thinking; switched to Haiku + capped at 5 iterations.
+    messages = [{
+        "role": "user",
+        "content": (
+            f"Analyze this Vikunja bug. Search for the relevant source file using run_shell "
+            f"(grep in pkg/models/ or frontend/src/, exclude _test and swagger files), "
+            f"then read_file the most likely file. Max 4 tool calls total.\n\n"
+            f"Issue: {ctx.issue_title}\n"
+            f"Repo: {ctx.repo_path}\n\n"
+            f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
+            "Respond with JSON only:\n"
+            '{"root_cause": "...", "confidence": 0.XX, '
+            '"files": ["relative/path/to/file.go"], '
+            '"buggy_pattern": "exact string that is wrong in the source"}'
+        ),
+    }]
+
+    for _ in range(5):
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=4096,
+            tools=_ROOT_CAUSE_TOOLS,
+            messages=messages,
+        )
+        tracker.record(response.model, response.usage)
+
+        if response.stop_reason == "end_turn":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                if block.name == "read_file":
+                    try:
+                        result = read_file(block.input["path"])
+                    except (FileNotFoundError, IsADirectoryError, OSError) as e:
+                        result = f"Error: {e}"
+                elif block.name == "run_shell":
+                    stdout, stderr, _ = run_shell(block.input["cmd"], cwd=ctx.repo_path)
+                    result = (stdout + stderr)[:4000]
+                else:
+                    result = f"Unknown tool: {block.name}"
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result[:8000],
+                })
+
+        if not tool_results:
+            break
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    text = next((b.text for b in response.content if b.type == "text"), None)
+    if not text:
+        raise ValueError(f"Opus returned no text block. Content types: {[b.type for b in response.content]}")
+    data = _extract_json(text)
     return (
         data["root_cause"],
         float(data["confidence"]),
@@ -201,6 +291,11 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
 
 
 def _find_relevant_people(ctx: BugContext, gh: GitHubClient) -> None:
+    notify_user = os.environ.get("NOTIFY_USER", "")
+    if notify_user:
+        ctx.blame_author = notify_user
+        return
+
     if not ctx.affected_files or not ctx.buggy_pattern:
         return
     filepath = ctx.affected_files[0]
@@ -233,8 +328,7 @@ def _classify_severity(ctx: BugContext, tracker: CostTracker) -> Severity:
     )
     tracker.record(response.model, response.usage)
     text = next(b.text for b in response.content if b.type == "text")
-    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(cleaned)
+    data = _extract_json(text)
     return Severity(data["severity"])
 
 
