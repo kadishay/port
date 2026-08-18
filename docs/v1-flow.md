@@ -205,7 +205,14 @@ git -C <repo_path> checkout -b fix/issue-<N>
 **Model:** `claude-haiku-4-5`  
 **Tools available:** same `read_file`, `write_file`, `run_shell` as triage
 
-Haiku reads the relevant source files, writes the corrected version, and runs the tests to verify the fix works. The loop exits when Haiku calls `end_turn`. Opus already diagnosed the root cause in step 2d — by this point the problem is understood and Haiku just needs to translate that into a code change.
+Haiku finds the exact file, checks recent git history to recover the original value before the bug was introduced, then writes the minimal fix and runs tests. The fix strategy:
+
+1. **Locate** — grep for the buggy pattern in `pkg/models/` or `frontend/src/` to confirm the file.
+2. **Recover original** — `git log -5 -- <file>` then `git show <prev-sha>:<path>` to see what the line looked like before the bug commit. This ensures the fix restores the intended value (e.g. `time.Hour*14`) rather than guessing a simpler replacement.
+3. **Change exactly one value** — only the identified buggy value is replaced; no reformatting, no nearby fixes, no new functions.
+4. **Verify** — `run_shell` to build and test.
+
+The loop exits when Haiku calls `end_turn`, capped at 8 iterations.
 
 ### 4b². Verify Fix with Playwright (optional)
 
