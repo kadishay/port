@@ -36,6 +36,12 @@ _TRIAGE_TOOLS = [
 def run_triage(ctx: BugContext, gh: GitHubClient) -> BugContext:
     steps = _parse_reproduction_steps(ctx)
     ctx.reproduction_log = _reproduce(ctx, steps)
+
+    _check_not_a_bug(ctx)
+    if ctx.not_a_bug:
+        _post_not_a_bug_comment(ctx, gh)
+        return ctx
+
     ctx.root_cause, ctx.confidence = _analyze_root_cause(ctx)
     ctx.severity = _classify_severity(ctx)
     _post_triage_comment(ctx, gh)
@@ -98,6 +104,70 @@ def _reproduce(ctx: BugContext, steps: str) -> str:
         messages.append({"role": "user", "content": tool_results})
 
     return "\n".join(log_parts)
+
+
+def _check_not_a_bug(ctx: BugContext) -> None:
+    messages = [{
+        "role": "user",
+        "content": (
+            f"A user filed this issue against Vikunja (a task manager):\n\n"
+            f"Title: {ctx.issue_title}\n\n"
+            f"Body: {ctx.issue_body}\n\n"
+            f"Reproduction result:\n{ctx.reproduction_log[:2000]}\n\n"
+            "Check the Vikunja documentation and source code to determine whether the "
+            "reported behaviour is actually the intended, documented behaviour.\n"
+            f"Repo path: {ctx.repo_path}\n\n"
+            "Read any relevant README, docs/, or changelog files. "
+            'Respond with JSON only: {{"not_a_bug": true/false, "reason": "one sentence"}}'
+        ),
+    }]
+
+    while True:
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1024,
+            tools=_TRIAGE_TOOLS,
+            messages=messages,
+        )
+
+        if response.stop_reason == "end_turn":
+            text = next((b.text for b in response.content if b.type == "text"), None)
+            if text:
+                cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                try:
+                    data = json.loads(cleaned)
+                    if data.get("not_a_bug"):
+                        ctx.not_a_bug = True
+                        ctx.not_a_bug_reason = data.get("reason", "")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                result = _execute_tool(block.name, block.input, ctx.repo_path)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+
+def _post_not_a_bug_comment(ctx: BugContext, gh: GitHubClient) -> None:
+    gh.post_comment(
+        ctx.issue_number,
+        f"## 🤖 Automated Triage — Not a Bug\n\n"
+        f"After reviewing the Vikunja documentation and source code, this appears to be "
+        f"**expected behaviour** rather than a bug.\n\n"
+        f"**Reason:** {ctx.not_a_bug_reason}\n\n"
+        f"If you believe this is incorrect, please add more context and reopen the issue.\n\n"
+        f"*Triage powered by Claude Haiku 4.5*"
+    )
+    gh.add_label(ctx.issue_number, "not-a-bug")
 
 
 def _analyze_root_cause(ctx: BugContext) -> tuple[str, float]:

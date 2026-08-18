@@ -64,9 +64,10 @@ GitHub POST /webhook
 
 `agent/triage.py` → `run_triage(ctx, gh)`
 
-Triage runs four sequential sub-steps across two models:
+Triage runs five sequential sub-steps across two models:
 
 ### 2a. Parse Reproduction Steps (Haiku)
+
 
 **Model:** `claude-haiku-4-5`  
 **Input:** Issue title + body  
@@ -88,7 +89,23 @@ Haiku is cheap and fast for this structured extraction task.
 
 **Output:** `ctx.reproduction_log` — raw stdout/stderr from all tool calls, plus the model's final summary of what it observed.
 
-### 2c. Root Cause Analysis (Opus)
+### 2c. "Not a Bug" Check (Haiku + tool loop)
+
+**Model:** `claude-haiku-4-5` with tools  
+**Tools available:** `read_file`, `run_shell` (same as 2b)
+
+Haiku reads the Vikunja documentation and relevant source files to determine whether the reported behaviour is actually the intended, documented behaviour.
+
+**Output:** JSON `{"not_a_bug": true/false, "reason": "..."}`
+
+If `not_a_bug = true`:
+- A comment is posted explaining why it's expected behaviour, with the reason
+- A `not-a-bug` label is added to the issue
+- Triage ends here — root cause analysis and the solve pipeline are skipped entirely
+
+This check runs before Opus to avoid spending expensive tokens on issues that aren't actually bugs.
+
+### 2d. Root Cause Analysis (Opus)
 
 **Model:** `claude-opus-4-8` with adaptive thinking  
 **Input:** Issue title + reproduction log  
@@ -101,7 +118,7 @@ ctx.root_cause = "The overdue window uses time.Hour*38 instead of time.Hour*14..
 ctx.confidence = 0.92
 ```
 
-### 2d. Severity Classification (Haiku)
+### 2e. Severity Classification (Haiku)
 
 **Model:** `claude-haiku-4-5`  
 **Input:** Root cause string  
@@ -113,7 +130,7 @@ Haiku applies a four-point rubric:
 - `MEDIUM` — degraded UX, edge case error
 - `LOW` — visual glitch, non-blocking
 
-### 2e. Triage Comment Posted
+### 2f. Triage Comment Posted
 
 A formatted comment is posted to the GitHub issue with:
 - Severity badge + emoji
@@ -235,15 +252,15 @@ orchestrator.py            fetch issue → build BugContext
 triage.py
   ├─ Haiku              parse reproduction steps from issue body
   ├─ Haiku (tool loop)  run shell/file tools to reproduce the bug
+  ├─ Haiku (tool loop)  check docs/source → is this expected behaviour?
+  │     └─ not_a_bug = true ──▶ post "not a bug" comment + label, stop
   ├─ Opus + thinking    root cause → {root_cause, confidence}
   └─ Haiku              classify severity → CRITICAL/HIGH/MEDIUM/LOW
-    │
-    ├─ severity < HIGH ──▶ add GitHub label, done
     │
     ▼
 solve.py
   ├─ git checkout -b fix/issue-N
-  ├─ Opus + thinking (tool loop)   read files → write fix → run tests
+  ├─ Haiku (tool loop)             read files → write fix → run tests
   ├─ git diff                       capture proposed_diff
   ├─ evaluate_risk()                LOW / MEDIUM / HIGH / ESCALATE
   └─ evaluate_autonomy()            AUTO_MERGE / HITL_REQUIRED / ESCALATE_ONLY

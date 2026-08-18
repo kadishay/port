@@ -94,9 +94,8 @@ def _apply_fix(ctx: BugContext) -> None:
 
     while True:
         response = client.messages.create(
-            model="claude-opus-4-8",
+            model="claude-haiku-4-5",
             max_tokens=8192,
-            thinking={"type": "adaptive"},
             tools=_SOLVE_TOOLS,
             messages=messages,
         )

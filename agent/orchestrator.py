@@ -23,6 +23,11 @@ def run_pipeline(issue_number: int) -> BugContext:
     ctx.slack_thread_ts = thread_ts or ""
 
     ctx = run_triage(ctx, gh)
+
+    if ctx.not_a_bug:
+        _notify_thread(ctx, f"🚫 Issue #{issue_number} closed as not a bug: {ctx.not_a_bug_reason}")
+        return ctx
+
     _notify_thread(ctx, (
         f"🔬 Triage complete — Severity: *{ctx.severity}* | Confidence: {ctx.confidence:.0%}\n"
         f"Root cause: {ctx.root_cause[:200]}"

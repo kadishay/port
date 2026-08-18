@@ -23,6 +23,7 @@ def test_triage_sets_severity_high(mock_client, mock_gh_class, tmp_path):
     mock_client.messages.create.side_effect = [
         _end_turn("Run: curl http://localhost:3456/api/v1/tasks"),
         _end_turn("Reproduction complete. Output: tasks due tomorrow flagged overdue."),
+        _end_turn('{"not_a_bug": false, "reason": ""}'),
         _end_turn('{"root_cause": "time.Hour*38 window too large", "confidence": 0.92}'),
         _end_turn('{"severity": "HIGH"}'),
     ]

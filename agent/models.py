@@ -37,6 +37,8 @@ class BugContext:
     risk_reasons: list[str] = field(default_factory=list)
     autonomy_decision: AutonomyDecision = AutonomyDecision.HITL_REQUIRED
     autonomy_reasons: list[str] = field(default_factory=list)
+    not_a_bug: bool = False
+    not_a_bug_reason: str = ""
     fix_branch: str = ""
     pr_url: str = ""
     slack_thread_ts: str = ""
