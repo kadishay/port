@@ -236,6 +236,8 @@ No human is involved at any point.
 4. `/reject` → deletes the fix branch, posts a rejection acknowledgement
 5. Timeout → deletes the fix branch, posts a timeout notice
 
+> **Phase 2:** HITL approval moves to Slack. The agent posts the diff and approval request to the `#bug-triage` thread for that issue. A human replies `/approve` or `/reject` in the thread — no need to touch GitHub comments. `wait_for_approval()` switches automatically when `SLACK_APP_TOKEN` is set.
+
 ---
 
 ## Step 5 — Status Notifications
