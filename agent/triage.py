@@ -63,10 +63,10 @@ def run_triage(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCo
         return ctx
 
     import time as _time
-    print(f"[triage] #{ctx.issue_number} — Root cause analysis", flush=True)
+    print(f"[triage] #{ctx.issue_number} — root cause analysis", flush=True)
     _t0 = _time.time()
     ctx.root_cause, ctx.confidence, ctx.affected_files, ctx.buggy_pattern = _analyze_root_cause(ctx, tracker)
-    print(f"[triage] #{ctx.issue_number} — Opus root cause done in {_time.time() - _t0:.1f}s", flush=True)
+    print(f"[triage] #{ctx.issue_number} — root cause done in {_time.time() - _t0:.1f}s", flush=True)
 
     print(f"[triage] #{ctx.issue_number} — finding relevant people", flush=True)
     _find_relevant_people(ctx, gh)
@@ -228,9 +228,16 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
     messages = [{
         "role": "user",
         "content": (
-            f"Analyze this Vikunja bug. Search for the relevant source file using run_shell "
-            f"(grep in pkg/models/ or frontend/src/, exclude _test and swagger files), "
-            f"then read_file the most likely file. Max 4 tool calls total.\n\n"
+            f"Analyze this Vikunja bug. Find and read the ONE source file that contains the bug. "
+            f"Use this exact search order (max 3 run_shell calls, then 1 read_file):\n"
+            f"1. Extract specific numbers/strings from the issue title and grep for them:\n"
+            f"   grep -r '<key term from issue>' {ctx.repo_path}/pkg/models/ {ctx.repo_path}/frontend/src/ "
+            f"--include='*.go' --include='*.ts' --exclude='*_test*' --exclude='*swagger*' -l | head -10\n"
+            f"2. If step 1 finds nothing, grep by filename pattern:\n"
+            f"   find {ctx.repo_path}/pkg/models {ctx.repo_path}/frontend/src -name '*.go' -o -name '*.ts' | "
+            f"grep -v '_test' | grep -v swagger | head -20\n"
+            f"3. read_file the most relevant file from the results.\n"
+            f"NEVER read a _test.go or swagger file.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Repo: {ctx.repo_path}\n\n"
             f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
@@ -357,7 +364,7 @@ def _post_triage_comment(ctx: BugContext, gh: GitHubClient) -> None:
         f"{people_section}"
         f"{screenshot_section}"
         f"### Reproduction Log\n```\n{ctx.reproduction_log[:2000]}\n```\n\n"
-        f"*Triage powered by Claude Opus 4.8*"
+        f"*Triage powered by Claude Haiku 4.5*"
     )
     gh.post_comment(ctx.issue_number, body)
 

@@ -158,16 +158,27 @@ def _execute_browser_tool(name: str, inputs: dict) -> str:
 
 def _apply_fix(ctx: BugContext, tracker: CostTracker) -> None:
     affected = ", ".join(ctx.affected_files) if ctx.affected_files else "unknown"
+    buggy_hint = (
+        f"Buggy pattern to locate: `{ctx.buggy_pattern}`\n"
+        if ctx.buggy_pattern else ""
+    )
     messages = [{
         "role": "user",
         "content": (
-            f"Fix this Vikunja bug in at most 5 tool calls total, then stop.\n\n"
+            f"Fix this Vikunja bug with the MINIMAL possible change — one line or value, not a refactor.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Root cause: {ctx.root_cause}\n"
-            f"Affected file(s): {affected}\n"
+            f"{buggy_hint}"
+            f"Suspected file(s): {affected}\n"
             f"Repo: {ctx.repo_path}\n\n"
-            "Steps: 1) read_file the affected file, 2) write_file with the fix, "
-            "3) run_shell to verify tests pass. Stop after that."
+            "Steps (at most 5 tool calls total):\n"
+            "1) run_shell: grep for the buggy pattern or function name in "
+            f"{ctx.repo_path}/pkg/models/ and {ctx.repo_path}/frontend/src/ "
+            "(exclude *_test* and *swagger*) to confirm the exact file and line.\n"
+            "2) read_file the confirmed file.\n"
+            "3) write_file with ONLY the minimal fix — change the one wrong value or line. "
+            "Do NOT add new functions, do NOT refactor unrelated code.\n"
+            "4) run_shell to build/test. Stop after that."
         ),
     }]
 
