@@ -51,3 +51,25 @@ class GitHubClient:
         )
         r.raise_for_status()
         return r.json()
+
+    def get_commit_author_login(self, commit_sha: str) -> str | None:
+        r = requests.get(self._url(f"commits/{commit_sha}"), headers=self._headers)
+        if r.status_code != 200:
+            return None
+        return (r.json().get("author") or {}).get("login")
+
+    def get_file_top_authors(self, filepath: str, n: int = 2) -> list[str]:
+        """Return top-n GitHub logins by commit count on filepath."""
+        r = requests.get(
+            self._url("commits"),
+            headers=self._headers,
+            params={"path": filepath, "per_page": 100},
+        )
+        if r.status_code != 200:
+            return []
+        counts: dict[str, int] = {}
+        for c in r.json():
+            login = (c.get("author") or {}).get("login")
+            if login:
+                counts[login] = counts.get(login, 0) + 1
+        return sorted(counts, key=lambda x: counts[x], reverse=True)[:n]

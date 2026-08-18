@@ -1,8 +1,14 @@
 import anthropic
 from agent.models import BugContext, AutonomyDecision
+from agent.cost_tracker import CostTracker
 from agent.tools.github_tools import GitHubClient
 from agent.tools.shell_tools import run_shell, git_diff
 from agent.tools.file_tools import read_file, write_file
+from agent.tools.browser_tools import (
+    BROWSER_TOOLS, browser_navigate, browser_click, browser_type,
+    browser_get_text, browser_screenshot, browser_wait, close_browser,
+    playwright_enabled,
+)
 from agent.autonomy import evaluate_autonomy
 from agent.hitl import wait_for_approval, HITLTimeout
 
@@ -42,12 +48,13 @@ _SOLVE_TOOLS = [
 ]
 
 
-def run_solve(ctx: BugContext, gh: GitHubClient) -> BugContext:
+def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugContext:
     fix_branch = f"fix/issue-{ctx.issue_number}"
     _create_fix_branch(ctx.repo_path, fix_branch)
     ctx.fix_branch = fix_branch
 
-    _apply_fix(ctx)
+    _apply_fix(ctx, tracker)
+    _verify_fix(ctx, tracker)
 
     diff = git_diff(ctx.repo_path)
     ctx.proposed_diff = diff
@@ -80,7 +87,71 @@ def run_solve(ctx: BugContext, gh: GitHubClient) -> BugContext:
     return _finish_and_open_pr(ctx, gh, diff)
 
 
-def _apply_fix(ctx: BugContext) -> None:
+def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
+    """Re-run the bug reproduction steps with browser tools and take an after-screenshot."""
+    if not playwright_enabled() or not ctx.screenshot_before or not ctx.reproduction_steps:
+        return
+
+    messages = [{
+        "role": "user",
+        "content": (
+            f"The following bug has been fixed. Use the browser to verify the fix works.\n\n"
+            f"Issue: {ctx.issue_title}\n"
+            f"Root cause that was fixed: {ctx.root_cause}\n\n"
+            f"Original reproduction steps:\n{ctx.reproduction_steps}\n\n"
+            f"Vikunja frontend: http://localhost:4173\n"
+            f"Re-run the steps and confirm the bug is gone. "
+            f"Take a screenshot named 'bug-{ctx.issue_number}-after.png' showing the fixed state."
+        ),
+    }]
+
+    while True:
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=4096,
+            tools=BROWSER_TOOLS,
+            messages=messages,
+        )
+
+        tracker.record(response.model, response.usage)
+        if response.stop_reason == "end_turn":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                result = _execute_browser_tool(block.name, block.input)
+                if block.name == "browser_screenshot" and not result.startswith("Error"):
+                    ctx.screenshot_after = result
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    close_browser()
+
+
+def _execute_browser_tool(name: str, inputs: dict) -> str:
+    if name == "browser_navigate":
+        return browser_navigate(inputs["url"])
+    if name == "browser_click":
+        return browser_click(inputs["selector"])
+    if name == "browser_type":
+        return browser_type(inputs["selector"], inputs["text"])
+    if name == "browser_get_text":
+        return browser_get_text(inputs["selector"])
+    if name == "browser_screenshot":
+        return browser_screenshot(inputs["filename"])
+    if name == "browser_wait":
+        return browser_wait(inputs.get("milliseconds", 1000))
+    return f"Unknown browser tool: {name}"
+
+
+def _apply_fix(ctx: BugContext, tracker: CostTracker) -> None:
     messages = [{
         "role": "user",
         "content": (
@@ -100,6 +171,7 @@ def _apply_fix(ctx: BugContext) -> None:
             messages=messages,
         )
 
+        tracker.record(response.model, response.usage)
         if response.stop_reason == "end_turn":
             break
 
@@ -143,10 +215,10 @@ def _abort_fix(repo_path: str, branch: str) -> None:
 
 
 def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
-    risk_info = f"**Risk level:** {ctx.risk_level}\n" if ctx.risk_level else ""
+    risk_info = f"**Risk level:** {ctx.risk_level.value}\n" if ctx.risk_level else ""
     return (
         f"## 🔧 Proposed Fix for #{ctx.issue_number}\n\n"
-        f"**Severity:** {ctx.severity} | **Confidence:** {ctx.confidence:.0%}\n\n"
+        f"**Severity:** {ctx.severity.value} | **Confidence:** {ctx.confidence:.0%}\n\n"
         f"{risk_info}"
         f"**Root cause:** {ctx.root_cause}\n\n"
         f"**HITL required because:** {'; '.join(reasons)}\n\n"
@@ -166,14 +238,22 @@ def _escalate_comment(ctx: BugContext) -> str:
 
 def _pr_body(ctx: BugContext, diff: str) -> str:
     auto = ctx.autonomy_decision == AutonomyDecision.AUTO_MERGE
-    risk_line = f"**Risk:** {ctx.risk_level} ({'; '.join(ctx.risk_reasons)})\n\n" if ctx.risk_level else ""
+    risk_line = f"**Risk:** {ctx.risk_level.value} ({'; '.join(ctx.risk_reasons)})\n\n" if ctx.risk_level else ""
+    screenshots = ""
+    if ctx.screenshot_before:
+        screenshots += f"**Before fix:** `{ctx.screenshot_before}`\n"
+    if ctx.screenshot_after:
+        screenshots += f"**After fix:** `{ctx.screenshot_after}`\n"
+    if screenshots:
+        screenshots = f"\n### Screenshots\n{screenshots}\n"
     return (
         f"Fixes #{ctx.issue_number}\n\n"
-        f"**Severity:** {ctx.severity} | **Confidence:** {ctx.confidence:.0%}\n\n"
+        f"**Severity:** {ctx.severity.value} | **Confidence:** {ctx.confidence:.0%}\n\n"
         f"{risk_line}"
         f"**Root cause:** {ctx.root_cause}\n\n"
+        f"{screenshots}"
         f"**Merge decision:** {'Automatic (LOW risk + criteria met)' if auto else 'Human approved via GitHub'}\n\n"
-        "*Fix proposed by Claude Opus 4.8*"
+        "*Fix proposed by Claude Haiku 4.5 / Verified by Playwright*"
     )
 
 

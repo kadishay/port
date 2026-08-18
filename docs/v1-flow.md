@@ -89,9 +89,22 @@ Haiku is cheap and fast for this structured extraction task.
 
 **Output:** `ctx.reproduction_log` — raw stdout/stderr from all tool calls, plus the model's final summary of what it observed.
 
-**V1 limitation — frontend bugs can't be truly reproduced here.** `run_shell` and `read_file` only reach the backend API and the source tree. For a frontend bug like the kanban condition inversion, there is no API endpoint that exposes the wrong behaviour — Haiku ends up reading the `.ts` source file and reasoning about the code instead of executing it. The reproduction log for frontend bugs is a code inspection, not a real reproduction.
+**When `PLAYWRIGHT_ENABLED=true`**, six additional browser tools are available alongside `run_shell` and `read_file`:
 
-> **Phase 2:** A Playwright (headless Chromium) tool will be added to this step. For issues classified as frontend bugs, the agent will drive the Vikunja UI — navigate to the relevant view, perform the reported steps, and capture a screenshot as proof. The same Playwright script will re-run after the fix is applied to verify the bug is gone before the PR is opened. Requires the frontend dev server (`pnpm dev`, port 4173) to be running.
+| Tool | What it does |
+|------|-------------|
+| `browser_navigate(url)` | Navigate to a URL (Vikunja frontend at `:4173`) |
+| `browser_click(selector)` | Click an element by CSS or text selector |
+| `browser_type(selector, text)` | Fill an input field |
+| `browser_get_text(selector)` | Read visible text from an element |
+| `browser_screenshot(filename)` | Take a screenshot — path saved to `ctx.screenshot_before` |
+| `browser_wait(ms)` | Wait for animations or async updates |
+
+Haiku decides whether to use the browser based on the issue body. For backend bugs it uses `run_shell`. For UI bugs it navigates to the frontend, performs the reproduction steps, and calls `browser_screenshot` to capture proof. The browser is closed after the reproduce step — the screenshot path is included in the triage comment.
+
+**When `PLAYWRIGHT_ENABLED=false` (default):** browser tools are not offered to the model. Frontend bugs fall back to source code inspection via `read_file`. No Playwright installation required.
+
+**Requires:** `pip install playwright && playwright install chromium` + Vikunja frontend running (`pnpm dev`, port 4173).
 
 ### 2c. "Not a Bug" Check (Haiku + tool loop)
 
@@ -113,16 +126,42 @@ This check runs before Opus to avoid spending expensive tokens on issues that ar
 
 **Model:** `claude-opus-4-8` with adaptive thinking  
 **Input:** Issue title + reproduction log  
-**Output:** JSON `{"root_cause": "...", "confidence": 0.XX}`
+**Output:** JSON `{"root_cause": "...", "confidence": 0.XX, "files": [...], "buggy_pattern": "..."}`
 
-Opus reads what the reproduction produced and explains *why* the bug happens — not just *what* happened. Thinking is enabled (`adaptive`) so it can reason through the code before committing to an answer. The confidence score (0.0–1.0) reflects how certain Opus is about its diagnosis.
+Opus reads what the reproduction produced and explains *why* the bug happens — not just *what* happened. Thinking is enabled (`adaptive`) so it can reason through the code before committing to an answer. The confidence score (0.0–1.0) reflects how certain Opus is about its diagnosis. The `files` and `buggy_pattern` fields are used by the next step to trace authorship.
 
 ```
-ctx.root_cause = "The overdue window uses time.Hour*38 instead of time.Hour*14..."
-ctx.confidence = 0.92
+ctx.root_cause    = "The overdue window uses time.Hour*38 instead of time.Hour*14..."
+ctx.confidence    = 0.92
+ctx.affected_files = ["pkg/models/task_overdue_reminder.go"]
+ctx.buggy_pattern  = "time.Hour*38"
 ```
 
-### 2e. Severity Classification (Haiku)
+### 2e. Find Relevant People (git + GitHub API)
+
+**No model — pure git + GitHub REST API calls**
+
+After the root cause is known, the agent traces two things:
+
+**Bug introducer** — uses `git log -S "<buggy_pattern>" -- <filepath>` (the "pickaxe") to find the exact commit that introduced the buggy string, regardless of when that was. `git log -1` would only find the most recent commit to the file, which could be a formatting change unrelated to the bug. The pickaxe finds the specific commit that added the problematic line.
+
+```bash
+git log -S "time.Hour*38" --format=%H -- pkg/models/task_overdue_reminder.go
+# → commit SHA d3f1a...
+GET /repos/kadishay/vikunja/commits/d3f1a...
+# → author.login: "dev-who-introduced-it"
+```
+
+**Area experts** — fetches the last 100 commits touching the affected file via the GitHub API, counts commits per author, and returns the top 2 by commit count (excluding the bug introducer to avoid duplication).
+
+```
+ctx.blame_author = "dev-who-introduced-it"
+ctx.area_experts = ["top-contributor-1", "top-contributor-2"]
+```
+
+Both are included in the triage comment as `@mention`s and in the Slack notification (Phase 2).
+
+### 2f. Severity Classification (Haiku)
 
 **Model:** `claude-haiku-4-5`  
 **Input:** Root cause string  
@@ -134,12 +173,13 @@ Haiku applies a four-point rubric:
 - `MEDIUM` — degraded UX, edge case error
 - `LOW` — visual glitch, non-blocking
 
-### 2f. Triage Comment Posted
+### 2g. Triage Comment Posted
 
 A formatted comment is posted to the GitHub issue with:
 - Severity badge + emoji
 - Confidence percentage
 - Root cause explanation
+- **People to notify** — `@blame_author (introduced the bug)`, `@expert1 (area expert)`, `@expert2 (area expert)`
 - Reproduction log (truncated to 2000 chars)
 
 ---
@@ -166,6 +206,14 @@ git -C <repo_path> checkout -b fix/issue-<N>
 **Tools available:** same `read_file`, `write_file`, `run_shell` as triage
 
 Haiku reads the relevant source files, writes the corrected version, and runs the tests to verify the fix works. The loop exits when Haiku calls `end_turn`. Opus already diagnosed the root cause in step 2d — by this point the problem is understood and Haiku just needs to translate that into a code change.
+
+### 4b². Verify Fix with Playwright (optional)
+
+**Only runs when:** `PLAYWRIGHT_ENABLED=true` AND a before-screenshot was captured during triage.
+
+Haiku re-runs the reproduction steps using the same browser tools, navigating back to the same view in the Vikunja frontend. It takes an after-screenshot (`bug-N-after.png`) showing the fixed state. Both screenshots (before + after) are included in the PR body as local file paths.
+
+If Playwright is disabled or the bug was backend-only (no before-screenshot), this step is skipped entirely.
 
 ### 4c. Capture the Diff
 
@@ -275,7 +323,8 @@ triage.py
   ├─ Haiku (tool loop)  run shell/file tools to reproduce the bug
   ├─ Haiku (tool loop)  check docs/source → is this expected behaviour?
   │     └─ not_a_bug = true ──▶ post "not a bug" comment + label, stop
-  ├─ Opus + thinking    root cause → {root_cause, confidence}
+  ├─ Opus + thinking    root cause → {root_cause, confidence, files, buggy_pattern}
+  ├─ git + GitHub API   blame_author (pickaxe) + area_experts (commit counts)
   └─ Haiku              classify severity → CRITICAL/HIGH/MEDIUM/LOW
     │
     ▼
@@ -311,8 +360,8 @@ solve.py
 | `agent/autonomy.py` | `evaluate_risk()` + `evaluate_autonomy()` — pure functions |
 | `agent/hitl.py` | Poll GitHub comments for `/approve` or `/reject` |
 | `agent/models.py` | `BugContext`, `Severity`, `RiskLevel`, `AutonomyDecision` |
-| `agent/tools/github_tools.py` | `GitHubClient` — issue fetch, comment post, label, PR create |
-| `agent/tools/shell_tools.py` | `run_shell()`, `git_diff()` |
+| `agent/tools/github_tools.py` | `GitHubClient` — issue fetch, comment post, label, PR create, commit author lookup, file top authors |
+| `agent/tools/shell_tools.py` | `run_shell()`, `git_diff()`, `git_find_introducer_sha()` |
 | `agent/tools/file_tools.py` | `read_file()`, `write_file()` |
 
 ---
@@ -369,17 +418,13 @@ Bug: tasks due in the next 38h incorrectly flagged as overdue
 Body:
 ```
 ## Description
-Tasks that are not yet overdue are being shown as overdue. The overdue 
-window appears to be 38 hours instead of the expected 14 hours.
+I'm getting overdue reminder emails for tasks that aren't due until tomorrow.
 
 ## Reproduction
-curl http://localhost:3456/api/v1/tasks?filter=due_date<now+38h
-
-Expected: only tasks due within 14h shown as overdue
-Actual: tasks due up to 38h ahead shown as overdue
-
-## Location
-Likely in pkg/models/task_overdue_reminder.go around line 41
+1. Create a task due tomorrow (24h from now)
+2. Wait for overdue reminders, or check the overdue list
+3. Expected: task is NOT flagged as overdue
+4. Actual: task appears in overdue reminders
 ```
 
 **What the agent does (automatically, ~2–3 minutes):**
@@ -436,10 +481,6 @@ instead of moving it to the configured Done bucket.
 3. Check the task as done
 4. Expected: task moves to the Done column
 5. Actual: task stays in its original bucket
-
-## Location
-Likely in frontend/src/stores/kanban.ts around line 173 — the condition 
-that decides whether to move a task to the done bucket
 ```
 
 **What the agent does (automatically, ~2–3 minutes):**

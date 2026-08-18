@@ -12,9 +12,10 @@ def _end_turn(text: str):
     return r
 
 
+@patch("agent.triage._find_relevant_people")
 @patch("agent.triage.GitHubClient")
 @patch("agent.triage.client")
-def test_triage_sets_severity_high(mock_client, mock_gh_class, tmp_path):
+def test_triage_sets_severity_high(mock_client, mock_gh_class, mock_people, tmp_path):
     from agent.triage import run_triage
 
     mock_gh = MagicMock()
@@ -23,7 +24,8 @@ def test_triage_sets_severity_high(mock_client, mock_gh_class, tmp_path):
     mock_client.messages.create.side_effect = [
         _end_turn("Run: curl http://localhost:3456/api/v1/tasks"),
         _end_turn("Reproduction complete. Output: tasks due tomorrow flagged overdue."),
-        _end_turn('{"root_cause": "time.Hour*38 window too large", "confidence": 0.92}'),
+        _end_turn('{"root_cause": "time.Hour*38 window too large", "confidence": 0.92, '
+                  '"files": ["pkg/models/task_overdue_reminder.go"], "buggy_pattern": "time.Hour*38"}'),
         _end_turn('{"severity": "HIGH"}'),
     ]
 

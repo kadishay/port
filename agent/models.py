@@ -39,6 +39,13 @@ class BugContext:
     autonomy_reasons: list[str] = field(default_factory=list)
     not_a_bug: bool = False
     not_a_bug_reason: str = ""
+    reproduction_steps: str = ""
+    screenshot_before: str = ""
+    screenshot_after: str = ""
+    affected_files: list[str] = field(default_factory=list)
+    buggy_pattern: str = ""
+    blame_author: str = ""
+    area_experts: list[str] = field(default_factory=list)
     fix_branch: str = ""
     pr_url: str = ""
     slack_thread_ts: str = ""
