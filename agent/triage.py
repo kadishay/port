@@ -228,16 +228,22 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
     messages = [{
         "role": "user",
         "content": (
-            f"Analyze this Vikunja bug. Find and read the ONE source file that contains the bug. "
-            f"Use this exact search order (max 3 run_shell calls, then 1 read_file):\n"
-            f"1. Extract specific numbers/strings from the issue title and grep for them:\n"
-            f"   grep -r '<key term from issue>' {ctx.repo_path}/pkg/models/ {ctx.repo_path}/frontend/src/ "
-            f"--include='*.go' --include='*.ts' --exclude='*_test*' --exclude='*swagger*' -l | head -10\n"
-            f"2. If step 1 finds nothing, grep by filename pattern:\n"
-            f"   find {ctx.repo_path}/pkg/models {ctx.repo_path}/frontend/src -name '*.go' -o -name '*.ts' | "
-            f"grep -v '_test' | grep -v swagger | head -20\n"
-            f"3. read_file the most relevant file from the results.\n"
-            f"NEVER read a _test.go or swagger file.\n\n"
+            f"Find the root cause of this Vikunja bug. Use up to 6 tool calls. Work systematically:\n\n"
+            f"SEARCH STRATEGY (follow in order):\n"
+            f"1. FILENAME FIRST — extract 2-3 feature keywords from the issue title, then find files "
+            f"whose NAME matches:\n"
+            f"   find {ctx.repo_path}/pkg/models {ctx.repo_path}/frontend/src "
+            f"-name '*<keyword>*' | grep -v test | grep -v swagger\n"
+            f"   Example: 'overdue reminder emails' → find files named *overdue* or *reminder*\n"
+            f"   Example: 'kanban done bucket' → find files named *kanban* or *bucket*\n"
+            f"2. CONTENT GREP — if filename search finds nothing, grep for the feature term inside files:\n"
+            f"   grep -rl '<keyword>' {ctx.repo_path}/pkg/models/ {ctx.repo_path}/frontend/src/ "
+            f"--include='*.go' --include='*.ts' --exclude='*_test*' --exclude='*swagger*' | head -10\n"
+            f"3. READ THE FILE — read_file the best candidate. Look for the specific wrong value/condition.\n"
+            f"4. IF UNCERTAIN — if you can't spot the bug in the first file, search for one more related file "
+            f"and read it. Confidence below 0.75 means keep looking.\n"
+            f"5. PINPOINT — identify the exact wrong string/value (the 'buggy_pattern') so the fix is 1 line.\n\n"
+            f"NEVER read a _test.go, _test.ts, or swagger file.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Repo: {ctx.repo_path}\n\n"
             f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
@@ -248,7 +254,7 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         ),
     }]
 
-    for _ in range(5):
+    for _ in range(8):
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=4096,

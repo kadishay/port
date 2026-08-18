@@ -124,7 +124,7 @@ This check runs before Opus to avoid spending expensive tokens on issues that ar
 
 ### 2d. Root Cause Analysis (Haiku + read_file tools)
 
-**Model:** `claude-haiku-4-5` with tools (capped at 5 iterations)
+**Model:** `claude-haiku-4-5` with tools (capped at 8 iterations)
 **Input:** Issue title + reproduction log  
 **Output:** JSON `{"root_cause": "...", "confidence": 0.XX, "files": [...], "buggy_pattern": "..."}`
 
@@ -323,7 +323,7 @@ triage.py
   ├─ Haiku (tool loop)  run shell/file tools to reproduce the bug
   ├─ Haiku (tool loop)  check docs/source → is this expected behaviour?
   │     └─ not_a_bug = true ──▶ post "not a bug" comment + label, stop
-  ├─ Opus + thinking    root cause → {root_cause, confidence, files, buggy_pattern}
+  ├─ Haiku (tool loop)  root cause → {root_cause, confidence, files, buggy_pattern}
   ├─ git + GitHub API   blame_author (pickaxe) + area_experts (commit counts)
   └─ Haiku              classify severity → CRITICAL/HIGH/MEDIUM/LOW
     │
@@ -355,7 +355,7 @@ solve.py
 | `agent/main.py` | CLI entry: `--issue N` or `--serve` |
 | `agent/webhook_server.py` | FastAPI on :9090, HMAC validation, thread dispatch |
 | `agent/orchestrator.py` | Pipeline coordinator, severity routing, status notifications |
-| `agent/triage.py` | Haiku parse → Haiku reproduce → Opus root cause → Haiku classify |
+| `agent/triage.py` | Haiku parse → Haiku reproduce → Haiku root cause → Haiku classify |
 | `agent/solve.py` | Haiku fix loop, diff capture, autonomy routing, PR/HITL/escalate |
 | `agent/autonomy.py` | `evaluate_risk()` + `evaluate_autonomy()` — pure functions |
 | `agent/hitl.py` | Poll GitHub comments for `/approve` or `/reject` |
@@ -412,19 +412,21 @@ bash bugs/introduce_bugs.sh
 
 Title:
 ```
-Bug: tasks due in the next 38h incorrectly flagged as overdue
+Getting overdue reminder emails for tasks that aren't due yet
 ```
 
 Body:
 ```
 ## Description
-I'm getting overdue reminder emails for tasks that aren't due until tomorrow.
+I'm receiving overdue reminder emails for tasks that still have plenty of time left.
+This started happening recently — reminders that used to arrive when a task was actually
+late are now arriving a day or more early.
 
 ## Reproduction
-1. Create a task due tomorrow (24h from now)
-2. Wait for overdue reminders, or check the overdue list
-3. Expected: task is NOT flagged as overdue
-4. Actual: task appears in overdue reminders
+1. Create a task due tomorrow
+2. Wait for the overdue reminder job to run (or check the overdue task list via the API)
+3. Expected: task is NOT in the overdue list
+4. Actual: task appears as overdue and triggers a reminder email
 ```
 
 **What the agent does (automatically, ~2–3 minutes):**
@@ -433,7 +435,7 @@ I'm getting overdue reminder emails for tasks that aren't due until tomorrow.
 2. **Triage:**
    - Haiku extracts the curl reproduction command from the issue body
    - Haiku runs the curl against `:3456`, reads `task_overdue_reminder.go`
-   - Opus identifies root cause: `time.Hour*38` should be `time.Hour*14`, confidence ~0.90+
+   - Haiku identifies root cause: `time.Hour*38` should be `time.Hour*14`, confidence ~0.90+
    - Haiku classifies: **HIGH** severity
    - Triage comment posted to GitHub issue
 3. **Solve:**
@@ -489,7 +491,7 @@ instead of moving it to the configured Done bucket.
 2. **Triage:**
    - Haiku extracts reproduction steps (manual UI steps)
    - Haiku reads `kanban.ts` to inspect the condition
-   - Opus identifies root cause: `=== doneBucketId` should be `!== doneBucketId` (inverted condition is a no-op), confidence ~0.90+
+   - Haiku identifies root cause: `=== doneBucketId` should be `!== doneBucketId` (inverted condition is a no-op), confidence ~0.90+
    - Haiku classifies: **HIGH** severity
    - Triage comment posted to GitHub issue
 3. **Solve:**
