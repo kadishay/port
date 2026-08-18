@@ -160,12 +160,12 @@ After triage, the orchestrator adds a severity label to the issue (`severity:hig
 git -C <repo_path> checkout -b fix/issue-<N>
 ```
 
-### 4b. Apply the Fix (Opus + tool loop)
+### 4b. Apply the Fix (Haiku + tool loop)
 
-**Model:** `claude-opus-4-8` with adaptive thinking  
+**Model:** `claude-haiku-4-5`  
 **Tools available:** same `read_file`, `write_file`, `run_shell` as triage
 
-Opus reads the relevant source files, writes the corrected version, and runs the tests to verify the fix works. The loop exits when Opus calls `end_turn`.
+Haiku reads the relevant source files, writes the corrected version, and runs the tests to verify the fix works. The loop exits when Haiku calls `end_turn`. Opus already diagnosed the root cause in step 2d — by this point the problem is understood and Haiku just needs to translate that into a code change.
 
 ### 4c. Capture the Diff
 
@@ -174,7 +174,7 @@ diff = git_diff(ctx.repo_path)   # git diff of all unstaged changes
 ctx.proposed_diff = diff
 ```
 
-### 4d. Evaluate Risk (autonomy.py)
+### 4d. Evaluate Risk (no model — pure Python)
 
 Two independent evaluations happen:
 
@@ -290,7 +290,7 @@ solve.py
 | `agent/webhook_server.py` | FastAPI on :9090, HMAC validation, thread dispatch |
 | `agent/orchestrator.py` | Pipeline coordinator, severity routing, status notifications |
 | `agent/triage.py` | Haiku parse → Haiku reproduce → Opus root cause → Haiku classify |
-| `agent/solve.py` | Opus fix loop, diff capture, autonomy routing, PR/HITL/escalate |
+| `agent/solve.py` | Haiku fix loop, diff capture, autonomy routing, PR/HITL/escalate |
 | `agent/autonomy.py` | `evaluate_risk()` + `evaluate_autonomy()` — pure functions |
 | `agent/hitl.py` | Poll GitHub comments for `/approve` or `/reject` |
 | `agent/models.py` | `BugContext`, `Severity`, `RiskLevel`, `AutonomyDecision` |
@@ -374,7 +374,7 @@ Likely in pkg/models/task_overdue_reminder.go around line 41
    - Haiku classifies: **HIGH** severity
    - Triage comment posted to GitHub issue
 3. **Solve:**
-   - Opus reads the file and writes the fix (`38` → `14`)
+   - Haiku reads the file and writes the fix (`38` → `14`)
    - Risk evaluated: 1 file, 1 line, confidence ≥ 0.85 → **LOW risk**
    - Decision: **AUTO_MERGE**
    - Commits to `fix/issue-N`, pushes, opens PR
@@ -432,7 +432,7 @@ that decides whether to move a task to the done bucket
    - Haiku classifies: **HIGH** severity
    - Triage comment posted to GitHub issue
 3. **Solve:**
-   - Opus reads `kanban.ts` and writes the fix (flips `===` to `!==`)
+   - Haiku reads `kanban.ts` and writes the fix (flips `===` to `!==`)
    - Risk evaluated: 1 file, 1 line, confidence ≥ 0.85 → **LOW risk**
    - Decision: **AUTO_MERGE**
    - Commits to `fix/issue-N`, pushes, opens PR
