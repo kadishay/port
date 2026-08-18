@@ -73,9 +73,10 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
         return ctx
 
     # Commit fix now — before any HITL wait — so external git ops can't wipe uncommitted changes
+    safe_title = ctx.issue_title[:50].replace("'", "")
     _, commit_out, rc = run_shell(
         f"git -C {ctx.repo_path} add -A && "
-        f"git -C {ctx.repo_path} commit -m 'fix: proposed fix for #{ctx.issue_number} — {ctx.issue_title[:50]}'"
+        f"git -C {ctx.repo_path} commit -m 'fix: proposed fix for #{ctx.issue_number} — {safe_title}'"
     )
     if rc != 0:
         msg = "⚠️ Fix agent ran but produced no file changes — no commit to push."
