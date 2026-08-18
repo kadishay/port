@@ -1,5 +1,13 @@
+import pytest
+from unittest.mock import patch
 from agent.autonomy import evaluate_autonomy, evaluate_risk
 from agent.models import BugContext, Severity, RiskLevel, AutonomyDecision
+
+
+@pytest.fixture(autouse=True)
+def mock_model_risk():
+    with patch("agent.autonomy._model_risk", return_value=(RiskLevel.LOW, "model agrees")) as m:
+        yield m
 
 
 def _ctx(**kwargs) -> BugContext:
@@ -118,6 +126,21 @@ def test_hitl_for_large_diff():
     decision, reasons = evaluate_autonomy(_ctx(), LARGE_DIFF)
     assert decision == AutonomyDecision.HITL_REQUIRED
     assert any("lines" in r for r in reasons)
+
+
+def test_model_raises_risk_above_rules(mock_model_risk):
+    # rules say LOW (small diff, high confidence) but Haiku sees something semantic
+    mock_model_risk.return_value = (RiskLevel.HIGH, "removes a null guard on user input")
+    risk, reasons = evaluate_risk(SMALL_DIFF, _ctx(confidence=0.90))
+    assert risk == RiskLevel.HIGH
+    assert any("Haiku raised" in r for r in reasons)
+
+
+def test_model_cannot_lower_risk_below_rules(mock_model_risk):
+    # rules say HIGH (large diff) but Haiku says LOW — rules win
+    mock_model_risk.return_value = (RiskLevel.LOW, "looks fine")
+    risk, _ = evaluate_risk(LARGE_DIFF, _ctx(confidence=0.90))
+    assert risk == RiskLevel.HIGH
 
 
 def test_escalate_for_auth_changes():
