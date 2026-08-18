@@ -355,7 +355,8 @@ GitHub webhook must be configured at `kadishay/vikunja → Settings → Webhooks
 **Step 1 — Introduce the bug:**
 ```bash
 bash bugs/introduce_bugs.sh
-# rebuilds are not needed — the agent reads the source file directly
+# commits and pushes to kadishay/vikunja with a plausible developer message
+# no rebuild needed — the agent reads source files directly, not the running binary
 ```
 
 **Step 2 — Open a GitHub issue on `kadishay/vikunja`:**
@@ -400,6 +401,7 @@ Likely in pkg/models/task_overdue_reminder.go around line 41
 **To reset:**
 ```bash
 bash bugs/revert_bugs.sh
+# reverts source, commits, and pushes to kadishay/vikunja
 ```
 
 ---
@@ -412,6 +414,7 @@ bash bugs/revert_bugs.sh
 **Step 1 — Introduce the bug:**
 ```bash
 bash bugs/introduce_bugs.sh
+# commits and pushes both bugs together — run once before either demo
 ```
 
 **Step 2 — Open a GitHub issue on `kadishay/vikunja`:**
@@ -458,6 +461,7 @@ that decides whether to move a task to the done bucket
 **To reset:**
 ```bash
 bash bugs/revert_bugs.sh
+# reverts source, commits, and pushes to kadishay/vikunja
 ```
 
 ---
