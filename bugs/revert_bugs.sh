@@ -11,4 +11,9 @@ echo "Reverting frontend bug"
 sed -i '' 's/currentTaskBucket\.id === currentView\.doneBucketId/currentTaskBucket.id !== currentView.doneBucketId/' \
   "$VIKUNJA/frontend/src/stores/kanban.ts"
 
-echo "Done. Bugs reverted."
+echo "Committing and pushing revert..."
+git -C "$VIKUNJA" add pkg/models/task_overdue_reminder.go frontend/src/stores/kanban.ts
+git -C "$VIKUNJA" commit -m "revert: restore correct overdue window and kanban done bucket condition"
+git -C "$VIKUNJA" push origin main
+
+echo "Done. Bugs reverted and pushed."
