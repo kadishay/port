@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bug Triage — Monitoring Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --gridline: #e1e0d9;
+    --baseline: #c3c2b7;
+    --series-be: #2a78d6;
+    --series-fe: #eb6834;
+    --ord-1: #86b6ef;
+    --ord-2: #5598e7;
+    --ord-3: #2a78d6;
+    --ord-4: #184f95;
+    --border: rgba(11,11,11,0.10);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 32px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--text-secondary); margin: 0 0 24px; }
+  .config-banner {
+    background: #fff4e5;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    display: none;
+  }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-value {
+    font-size: 28px;
+    font-weight: 600;
+    font-variant-numeric: normal;
+  }
+  .stat-label {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    margin-top: 4px;
+  }
+  .charts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .chart-title { font-weight: 600; margin: 0 0 12px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .bar-label { width: 90px; flex-shrink: 0; color: var(--text-secondary); font-size: 12px; }
+  .bar-track { flex: 1; background: var(--gridline); border-radius: 4px; height: 14px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; }
+  .bar-value { width: 48px; text-align: right; color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--gridline); }
+  th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.02em; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  a { color: var(--series-be); }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+  <h1>Bug Triage — Monitoring Dashboard</h1>
+  <p class="subtitle">Per-issue cost, duration, and outcome telemetry from the bug-triage pipeline.</p>
+
+  <div id="config-banner" class="config-banner card">
+    Set <code>SUPABASE_URL</code> and <code>SUPABASE_ANON_KEY</code> at the top of this file's
+    <code>&lt;script&gt;</code> block, then reload.
+  </div>
+
+  <div class="stat-grid" id="stats"></div>
+
+  <div class="charts">
+    <div class="card">
+      <p class="chart-title">Avg cost by bug type</p>
+      <div id="chart-bug-type"></div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Severity distribution</p>
+      <div id="chart-severity"></div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Merge rate by risk level</p>
+      <div id="chart-merge-rate"></div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Autonomy decisions</p>
+      <div id="chart-autonomy"></div>
+    </div>
+  </div>
+
+  <div class="card table-wrap">
+    <table id="runs-table">
+      <thead>
+        <tr>
+          <th>Issue</th><th>Type</th><th>Severity</th><th>Risk</th>
+          <th>Autonomy</th><th>Outcome</th><th class="num">Cost</th>
+          <th class="num">Duration</th><th>PR</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+<script type="module">
+  // Fill these in from your Supabase project settings (Project Settings → API).
+  const SUPABASE_URL = "";
+  const SUPABASE_ANON_KEY = "";
+
+  const SEVERITY_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+  const RISK_ORDER = ["LOW", "MEDIUM", "HIGH", "ESCALATE"];
+  const ORDINAL_COLORS = ["var(--ord-1)", "var(--ord-2)", "var(--ord-3)", "var(--ord-4)"];
+
+  function bar(label, valueLabel, fraction, color) {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML = `
+      <div class="bar-label">${label}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(fraction * 100)}%;background:${color}"></div></div>
+      <div class="bar-value">${valueLabel}</div>
+    `;
+    return row;
+  }
+
+  function statTile(value, label) {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `<div class="stat-value">${value}</div><div class="stat-label">${label}</div>`;
+    return div;
+  }
+
+  function renderStats(runs) {
+    const el = document.getElementById("stats");
+    el.innerHTML = "";
+    const avgCost = runs.length ? runs.reduce((s, r) => s + r.cost_usd, 0) / runs.length : 0;
+    const avgDuration = runs.length ? runs.reduce((s, r) => s + r.duration_seconds, 0) / runs.length : 0;
+    const merged = runs.filter(r => r.human_merged_as_is).length;
+    el.append(
+      statTile(runs.length, "Total runs"),
+      statTile(`$${avgCost.toFixed(3)}`, "Avg cost / run"),
+      statTile(`${avgDuration.toFixed(0)}s`, "Avg duration"),
+      statTile(runs.length ? `${Math.round((merged / runs.length) * 100)}%` : "—", "Merged as-is"),
+    );
+  }
+
+  function renderBugType(runs) {
+    const el = document.getElementById("chart-bug-type");
+    el.innerHTML = "";
+    for (const [type, color] of [["BE", "var(--series-be)"], ["FE", "var(--series-fe)"]]) {
+      const subset = runs.filter(r => r.bug_type === type);
+      const avg = subset.length ? subset.reduce((s, r) => s + r.cost_usd, 0) / subset.length : 0;
+      const maxCost = Math.max(0.001, ...runs.map(r => r.cost_usd));
+      el.appendChild(bar(type, `$${avg.toFixed(3)}`, avg / maxCost, color));
+    }
+  }
+
+  function renderOrdinal(elId, runs, field, order) {
+    const el = document.getElementById(elId);
+    el.innerHTML = "";
+    const counts = order.map(level => runs.filter(r => r[field] === level).length);
+    const max = Math.max(1, ...counts);
+    order.forEach((level, i) => el.appendChild(bar(level, String(counts[i]), counts[i] / max, ORDINAL_COLORS[i])));
+  }
+
+  function renderMergeRate(runs) {
+    const el = document.getElementById("chart-merge-rate");
+    el.innerHTML = "";
+    RISK_ORDER.forEach((level, i) => {
+      const subset = runs.filter(r => r.risk_level === level);
+      const rate = subset.length ? subset.filter(r => r.human_merged_as_is).length / subset.length : 0;
+      el.appendChild(bar(level, `${Math.round(rate * 100)}%`, rate, ORDINAL_COLORS[i]));
+    });
+  }
+
+  function renderTable(runs) {
+    const tbody = document.querySelector("#runs-table tbody");
+    tbody.innerHTML = "";
+    for (const r of runs) {
+      const tr = document.createElement("tr");
+      const prCell = r.pr_url ? `<a href="${r.pr_url}" target="_blank">PR</a>` : "—";
+      tr.innerHTML = `
+        <td>#${r.issue_number} ${r.issue_title}</td>
+        <td>${r.bug_type}</td>
+        <td>${r.severity}</td>
+        <td>${r.risk_level}</td>
+        <td>${r.autonomy_decision}</td>
+        <td>${r.pipeline_outcome}</td>
+        <td class="num">$${r.cost_usd.toFixed(4)}</td>
+        <td class="num">${r.duration_seconds.toFixed(0)}s</td>
+        <td>${prCell}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function main() {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      document.getElementById("config-banner").style.display = "block";
+      return;
+    }
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/bug_runs?select=*&order=created_at.desc`, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    });
+    const runs = await res.json();
+    renderStats(runs);
+    renderBugType(runs);
+    renderOrdinal("chart-severity", runs, "severity", SEVERITY_ORDER);
+    renderMergeRate(runs);
+    renderOrdinal("chart-autonomy", runs, "autonomy_decision", ["AUTO_PR", "HITL_REQUIRED"]);
+    renderTable(runs);
+  }
+
+  main();
+</script>
+</body>
+</html>
