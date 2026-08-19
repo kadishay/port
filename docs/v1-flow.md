@@ -11,9 +11,9 @@ This document walks through the complete lifecycle of a bug, from a GitHub issue
 YOTAM:
 Open items:
 0. test my hidden bug
-1. when tiraging, in case of low confidance when looking for root cause, lets add another step - try harder with Opus.
+1. DONE — see "2d. Root Cause Analysis" below. Confidence < 0.70 triggers one retry with Opus, told what the low-confidence Haiku attempt found so it can dig deeper instead of repeating the same search.
 2. DONE — see "4b². Verify the Fix Actually Works" below. FE: Playwright before/after screenshots (human eyeballs it, no pass/fail). BE: curl re-run + forced report_verification tool call → ctx.fix_verified bool + ctx.verification_log evidence.
-2. b. can we have confidance for this as well (a numeric score, not just bool)? and in case of low confidance try to use Opus?
+2. b. DONE — BE verify now reports a confidence score too (`ctx.verification_confidence`), same 0.70 Opus-retry threshold as root cause. FE verify stays screenshot-only (no model confidence to gate on).
 3. seems like the agent have a big hint on how to solve the kanban bug: KANBAN VERIFY STEPS (follow exactly)
 -->
 
@@ -36,7 +36,7 @@ Both modes call the same `run_pipeline(issue_number)` function in `orchestrator.
 
 **Validation:** The server verifies the `X-Hub-Signature-256` header using HMAC-SHA256 with `GITHUB_WEBHOOK_SECRET`. If the signature doesn't match, the request is rejected with 403.
 
-**Filtering:** Only `issues` events with `action = "opened"` proceed. Everything else (closed, labeled, commented, etc.) is ignored and returns 200.
+**Filtering:** Only `issues` events with `action` in `("opened", "reopened")` proceed — `payload.get("action") not in ("opened", "reopened")` returns 200 immediately. Everything else (closed, labeled, commented, etc.) is ignored. Reopening an issue re-runs the full pipeline exactly like opening a new one — there's no dedup against a prior run on the same issue number, so reopening #29 after it already got a PR triggers a second full triage+solve from scratch.
 
 **Dispatch:** A daemon thread is started for `run_pipeline(issue_number)`. The webhook returns 202 immediately — GitHub doesn't wait for the pipeline to finish.
 
@@ -45,7 +45,7 @@ GitHub POST /webhook
     │
     ├── Signature valid? ──No──▶ 403 Forbidden
     │
-    ├── Event = "issues" + action = "opened"? ──No──▶ 200 Ignored
+    ├── Event = "issues" + action in (opened, reopened)? ──No──▶ 200 Ignored
     │
     └── spawn daemon thread ──▶ run_pipeline(N) ──▶ 202 Accepted
 ```
@@ -57,7 +57,8 @@ GitHub POST /webhook
 `agent/orchestrator.py` → `run_pipeline(issue_number)`
 
 1. Creates a `GitHubClient` and fetches the issue via the GitHub REST API.
-2. Builds a `BugContext` dataclass — the single object passed through the entire pipeline:
+2. **Dedup check:** `gh.get_open_pr_for_branch(f"fix/issue-{issue_number}")` — a `GET /pulls?head=<owner>:<branch>&state=open` call. If a PR is already open for this issue's fix branch, the pipeline stops right here: posts an `ℹ️ ... already has an open PR ... skipping` comment and returns `None` without spending a single token on triage or solve. This exists because the webhook dispatches on both `opened` **and** `reopened` (see Step 0) — reopening an issue that already has an open PR would otherwise re-run the entire pipeline from scratch and crash at `create_pr()` with a GitHub 422 (`"A pull request already exists for ..."`), which is exactly what happened live on issue #29 before this check was added.
+3. Builds a `BugContext` dataclass — the single object passed through the entire pipeline:
    ```
    BugContext(
      issue_number, issue_title, issue_body,
@@ -69,8 +70,9 @@ GitHub POST /webhook
      fix_branch="", pr_url=""
    )
    ```
-3. Logs/notifies receipt of the issue (prints to stdout; Slack if `SLACK_BOT_TOKEN` is set).
-4. Creates a single `CostTracker()` (`tracker = CostTracker()`) and passes it as a parameter into every subsequent step — `run_triage(ctx, gh, tracker)` and `run_solve(ctx, gh, tracker)`. It accumulates for the whole pipeline run; see Step 6.
+4. Logs/notifies receipt of the issue (prints to stdout; Slack if `SLACK_BOT_TOKEN` is set).
+5. Creates a single `CostTracker()` (`tracker = CostTracker()`) and passes it as a parameter into every subsequent step — `run_triage(ctx, gh, tracker)` and `run_solve(ctx, gh, tracker)`. It accumulates for the whole pipeline run; see Step 6.
+6. **Crash safety:** from here through the end of triage+solve, everything runs inside a `try/except/finally`. If anything raises (a GitHub API error, a bug in the pipeline itself, etc.), the `except` posts a `❌ Pipeline crashed: <type>: <message>` comment to the issue instead of dying silently in the background thread. The `finally` guarantees `tracker.summary()` still runs and gets posted — win, lose, or crash, you always get a cost breakdown and you're never left wondering whether a run happened at all.
 
 ---
 
@@ -150,6 +152,8 @@ ctx.confidence     = 0.95
 ctx.affected_files = ["pkg/models/task_overdue_reminder.go"]
 ctx.buggy_pattern  = "done = true"
 ```
+
+**Low-confidence retry — try harder with Opus:** if `ctx.confidence < 0.70` (`_OPUS_RETRY_CONFIDENCE_THRESHOLD` in `agent/triage.py`) after the Haiku pass, `run_triage()` calls `_analyze_root_cause()` a second time with `model="claude-opus-4-8"`. The retry isn't a blind rerun — the prompt is prefixed with a `retry_note` telling Opus exactly what Haiku found and how confident it was (root cause, files, buggy pattern), so Opus can go verify or dig further rather than repeating the same shallow search. Opus's result unconditionally replaces Haiku's — `ctx.root_cause`/`ctx.confidence`/`ctx.affected_files`/`ctx.buggy_pattern` are all overwritten, even if Opus is *also* not confident (no further retries, one extra attempt only). Both `_analyze_root_cause()` and its forced-extraction fallback (`_force_tool_extraction()`) take a `model` parameter, so the same functions serve both the Haiku pass and the Opus retry — no duplicated logic.
 
 ### 2e. Find Relevant People (git + GitHub API)
 
@@ -247,24 +251,29 @@ There's no structured pass/fail here — a human eyeballs the before/after scree
 Haiku re-runs those same curl commands against the live Vikunja API (`VIKUNJA_API_BASE`, with the `Authorization: Bearer` header), in a tool loop capped at 5 iterations offering `run_shell` + `read_file` (no `write_file` — this step is read-only). It compares the response against the "Actual result" described in the issue, then must report a structured verdict via a **forced tool call**:
 
 ```python
-report_verification({"fixed": bool, "evidence": "curl output / observation"})
+report_verification({"fixed": bool, "confidence": 0.0-1.0, "evidence": "curl output / observation"})
 ```
 
 This mirrors the `report_root_cause` forced-tool-call pattern from root cause analysis (2d) — the model cannot end the loop with free prose, it has to call the tool. If it exhausts all 5 iterations without calling `report_verification` (e.g. it kept issuing more curl commands instead of concluding), `_force_verification_verdict()` makes one more forced-tool-call request asking for a best-effort verdict from whatever it observed so far.
 
 **Output written to context:**
 ```
-ctx.fix_verified     = True
-ctx.verification_log = "GET /tasks/42 → done=true, no reminder fired (previously fired one)"
+ctx.fix_verified            = True
+ctx.verification_confidence = 0.9
+ctx.verification_log        = "GET /tasks/42 → done=true, no reminder fired (previously fired one)"
 ```
 
 Unlike the frontend path, this gives a machine-checkable pass/fail rather than just a screenshot for a human to eyeball.
+
+**Low-confidence retry — try harder with Opus:** same mechanism as root-cause analysis (2d). The `_verify_fix()` dispatcher calls `_verify_fix_backend()` once with Haiku; if `ctx.verification_confidence < 0.70` (`_OPUS_RETRY_CONFIDENCE_THRESHOLD` in `agent/solve.py`), it calls `_verify_fix_backend()` again with `model="claude-opus-4-8"` and a `retry_note` telling Opus what Haiku's uncertain verdict was (`fixed`, `confidence`, `evidence`) so it re-checks rather than repeating the same shallow requests. Opus's verdict replaces Haiku's outright — one retry only, no further escalation if Opus is also unsure. `_verify_fix_backend()` and `_force_verification_verdict()` both take a `model` parameter for this — same pattern as `_analyze_root_cause()`.
+
+The frontend Playwright path has no numeric confidence (it's screenshot-based, a human eyeballs it), so it does **not** get an Opus retry — only the backend curl path does.
 
 #### Where it shows up
 
 Both paths feed `_pr_body()`:
 - Frontend: a "Screenshots" section (before/after file paths).
-- Backend: a "Verification (curl)" section with a ✅ Verified / ⚠️ Verification inconclusive badge and the evidence text.
+- Backend: a "Verification (curl)" section with a ✅ Verified / ⚠️ Verification inconclusive badge, the confidence percentage, and the evidence text.
 - The trailer line reflects which one actually ran: *Verified by Playwright* / *Verified via curl* / *Not independently verified* (neither path had enough context to run — e.g. `reproduction_steps` was empty).
 
 ### 4c. Capture the Diff
@@ -395,7 +404,7 @@ tracker.record(response.model, response.usage)
 
 Opus is priced but unused in practice — per `CLAUDE.md`'s "Key Decisions," Haiku alone is sufficient for these single-file logic bugs at ~5× lower cost.
 
-**Output:** at the very end of `run_pipeline()` — after `run_solve()` returns, regardless of whether that ended in a PR, a rejection, or a HITL timeout — `tracker.summary()` renders the breakdown. It's printed to stdout **and** posted as the final Slack thread message for that issue (`orchestrator.py`, right before `run_pipeline()` returns):
+**Output:** at the very end of `run_pipeline()`'s `try/finally` (Step 1) — regardless of whether the run ended in a PR, a rejection, a HITL timeout, a not-a-bug closure, or an uncaught exception — `tracker.summary()` renders the breakdown. It's printed to stdout **and** posted as the final Slack thread message for that issue. The one case with no cost summary at all is the dedup skip (issue already has an open PR) — that returns before the tracker is even created, since no tokens were spent.
 
 ```
 💰 *Cost breakdown:*
@@ -409,67 +418,99 @@ This really is the last thing that happens for an issue — there's no code afte
 
 Measured 2026-08-19 by running each demo bug through the real triage → solve pipeline via `tests/test_demo_bugs_integration.py` (GitHub API and `git push` mocked, everything else — including all Anthropic API calls — running the same code path as production). Numbers are read straight off `tracker.summary()` inside each run.
 
-| | Backend — `task_overdue_reminder.go` (no Playwright) | Frontend — `kanban.ts` (no Playwright) | Frontend — `kanban.ts` (Playwright on) |
-|---|---|---|---|
-| Runs | 3 | 3 | 1 (ballpark) |
-| Avg wall-clock time | **~67s** (63s – 73s) | **~89s** (84s – 92s) | **~103s** |
-| Avg cost | **~$0.13** ($0.11 – $0.14) | **~$0.18** ($0.16 – $0.19) | **~$0.23** |
-| Avg tokens (in / out) | ~95,400 in / ~6,680 out | ~126,300 in / ~10,100 out | ~199,800 in / ~5,500 out |
-| Autonomy decision | `AUTO_PR`, all 3 runs | Confidence 0.72–0.85, below the 0.85 `AUTO_PR` floor — routes to HITL | — |
+| | Backend — `task_overdue_reminder.go` (no Playwright) | Frontend — `kanban.ts` (no Playwright) | Frontend — `kanban.ts` (Playwright on) | BE + Opus retry (live, #32) |
+|---|---|---|---|---|
+| Runs | 4 | 7 | 1 (ballpark) | 1 (live, real bug report) |
+| Avg wall-clock time | **~90s** (63s – 159s, one slow outlier) | **~73s** (56s – 92s) | **~103s** | not captured — longer than norm (2× verify attempts) |
+| Avg cost | **~$0.12** ($0.10 – $0.14) | **~$0.14** ($0.09 – $0.19) | **~$0.23** | **~$0.40** |
+| Avg tokens (in / out) | ~88,500 in / ~6,740 out | ~93,000 in / ~8,640 out | ~199,800 in / ~5,500 out | 108,589 in / 5,367 out (Haiku) + 36,377 in / 3,310 out (Opus) |
+| Autonomy decision | `AUTO_PR`, all 4 runs | Mixed — some `AUTO_PR` (confidence ≥ 0.85), some `HITL_REQUIRED` (0.72–0.84) | — | n/a — no fix to evaluate (no real bug, no file changes) |
 
-FE costs more than BE mainly because `kanban.ts` has two near-identical conditions (line 173 and 178, see the docstring in `test_frontend_bug_kanban_done_bucket`), so root-cause analysis and the fix loop both need more back-and-forth to disambiguate than the single unambiguous `done = true` in the backend query.
+FE was re-measured with 4 additional runs on a second pass (root cause confidence 0.95–0.98 across the board this round, noticeably higher and cheaper/faster than the first 3-run batch, which landed at 0.72–0.85) — widening the observed range considerably: $0.09–$0.19 and 56s–92s. This is a real illustration of run-to-run LLM variance on the same bug, not measurement error; `kanban.ts`'s two near-identical conditions (line 173 and 178, see the docstring in `test_frontend_bug_kanban_done_bucket`) mean how much back-and-forth root-cause analysis needs varies noticeably by run, unlike the single unambiguous `done = true` in the backend query (BE root-cause confidence stayed tight — 0.95–0.99 — across every run measured).
 
-Turning Playwright on adds a further ~15–20% in both time and cost on top of that — the reproduce step alone can take up to 18 browser tool calls to log in, navigate, and capture the before-screenshot, plus a second full browser pass for the after-screenshot at verify time. Two live webhook runs from `/private/tmp/agent.log` land in a similar range: issue #27 (kanban) cost $0.2378, issue #28 (an unrelated auth bug, also routed through the FE+Playwright path) cost $0.3458. Budget accordingly if demoing with Playwright on — treat the Playwright column as a ballpark, not a tight average (n=1 here).
+**BE outlier:** one BE run took 159.18s (vs. 63–73s for the others) — its verify-fix curl loop exhausted all 5 tool calls without the model calling `report_verification`, so `_force_verification_verdict()` had to make one more request; that extra round-trip plus the model's slower, more exploratory curl usage this run accounts for the gap. It still landed above the Opus threshold (confidence 0.75) and cost about the same as the faster runs ($0.1025) — the outlier is in wall-clock time, not cost or correctness. A second BE run in this batch failed outright, but for an unrelated reason (the model issued `find / -type d -name "vikunja"` — a filesystem-wide search — which hit a 10s subprocess timeout); excluded from the average since it's a tool-choice quirk, not a measure of pipeline cost/time/confidence.
+
+**Opus retry — captured live (issue #32):** none of the 11 controlled runs above triggered it (closest was 0.75), but a live webhook run did. Issue #32 was a deliberately vague report with no real underlying bug. Root cause landed at exactly 0.70 (the boundary — the check is strict `< 0.70`, so root cause alone did *not* retry), but the backend curl verify step came back at confidence 0.60, which did trigger `_verify_fix_backend(..., model="claude-opus-4-8", ...)`. Real cost breakdown from that run:
+
+```
+claude-haiku-4-5: 108,589 in / 5,367 out → $0.1354
+claude-opus-4-8:   36,377 in /  3,310 out → $0.2646
+Total: $0.4001
+```
+
+The Opus call alone cost **$0.2646** — roughly double the rest of the pipeline, consistent with Opus's 5× per-token pricing (`_RATES` in Step 6). This is the system working correctly, not a failure: since there was no real bug, `apply_fix` made no file changes, and both Haiku (0.60) and Opus (0.30) correctly declined to claim the fix was verified rather than fabricating false confidence — Opus, if anything, was *more* skeptical than Haiku, which is the right direction for a "try harder" fallback on a genuinely unfixable report. Wall-clock time wasn't captured for this run (no timestamps in the webhook log), but with two full 5-iteration verify attempts back to back it ran noticeably longer than the ~65–90s norm above.
+
+Treat $0.40 as one real data point, not an average (n=1) — but it's a useful ceiling: "Haiku run cost + Opus retry" lands close to **2.5–3× a normal Haiku-only run** when the retry also has to exhaust its tool budget rather than concluding early.
+
+Turning Playwright on adds a further ~15–20% in both time and cost on top of the FE baseline — the reproduce step alone can take up to 18 browser tool calls to log in, navigate, and capture the before-screenshot, plus a second full browser pass for the after-screenshot at verify time. Two live webhook runs from `/private/tmp/agent.log` land in a similar range: issue #27 (kanban) cost $0.2378, issue #28 (an unrelated auth bug, also routed through the FE+Playwright path) cost $0.3458. Budget accordingly if demoing with Playwright on — treat the Playwright column as a ballpark, not a tight average (n=1 here).
 
 ---
 
 ## Data Flow Summary
 
 ```
-GitHub Issue
+GitHub Issue (opened or reopened)
     │
     ▼
-webhook_server.py          validates HMAC, dispatches thread
+webhook_server.py          validates HMAC, dispatches daemon thread
     │
     ▼
-orchestrator.py            fetch issue → build BugContext
+orchestrator.py            fetch issue
+    │
+    ├─ get_open_pr_for_branch(fix/issue-N)
+    │     └─ open PR exists ──▶ post "already has an open PR" comment, STOP
+    │                           (no BugContext, no CostTracker, zero tokens spent)
     │
     ▼
-triage.py
-  ├─ Haiku              parse reproduction steps from issue body
-  ├─ Haiku (tool loop)  run shell/file tools to reproduce the bug
-  ├─ Haiku (tool loop)  check docs/source → is this expected behaviour?
-  │     └─ not_a_bug = true ──▶ post "not a bug" comment + label, stop
-  ├─ Haiku (tool loop)  root cause → {root_cause, confidence, files, buggy_pattern}
-  ├─ git + GitHub API   blame_author (pickaxe) + area_experts (commit counts)
-  └─ Haiku              classify severity → CRITICAL/HIGH/MEDIUM/LOW
+    build BugContext, create CostTracker
     │
-    ▼
-solve.py
-  ├─ git checkout -b fix/issue-N
-  ├─ Haiku (tool loop)             read files → write fix → run tests
-  ├─ verify fix                     Playwright (FE) or curl (BE) re-run → pass/fail + evidence
-  ├─ git diff                       capture proposed_diff
-  ├─ evaluate_risk()                LOW / MEDIUM / HIGH / ESCALATE
-  └─ Solution Decision              AUTO_PR / HITL_REQUIRED
-    │
-    ├─ AUTO_PR     ──▶ git commit + push → create PR → post success comment
-    │                     (only when risk = LOW and severity ≠ CRITICAL)
-    │                     PR sits open — a human still merges it on GitHub
-    │
-    └─ HITL_REQUIRED  ──▶ post diff comment → poll for /approve or /reject
-                          (risk = MEDIUM/HIGH/ESCALATE, or severity = CRITICAL)
-                              │
-                              ├─ /approve  ──▶ git commit + push → create PR
-                              │               (PR sits open — human merges on GitHub, same as AUTO_PR)
-                              ├─ /reject   ──▶ delete branch, acknowledge
-                              └─ timeout   ──▶ delete branch, notify
-    │
-    ▼
-CostTracker.summary()      💰 print to stdout + post to Slack thread — always runs, last step
+┌─── try ─────────────────────────────────────────────────────────────────┐
+│   ▼                                                                      │
+│ triage.py                                                                │
+│   ├─ Haiku              parse reproduction steps from issue body        │
+│   ├─ Haiku (tool loop)  run shell/file tools to reproduce the bug       │
+│   ├─ Haiku (tool loop)  check docs/source → is this expected behaviour?│
+│   │     └─ not_a_bug = true ──▶ post "not a bug" comment + label, stop │
+│   ├─ Haiku (tool loop)  root cause → {root_cause, confidence, ...}     │
+│   │     └─ confidence < 0.70 ──▶ retry root cause with Opus            │
+│   │                              (told what Haiku found; Opus's answer  │
+│   │                               replaces Haiku's outright, one retry) │
+│   ├─ git + GitHub API   blame_author (pickaxe) + area_experts          │
+│   └─ Haiku              classify severity → CRITICAL/HIGH/MEDIUM/LOW  │
+│     │                                                                    │
+│     ▼                                                                    │
+│ solve.py                                                                 │
+│   ├─ git checkout -b fix/issue-N                                        │
+│   ├─ Haiku (tool loop)   read files → write fix → run tests            │
+│   ├─ verify fix           Playwright (FE, no Opus option) or            │
+│   │                       curl (BE) re-run → {fixed, confidence, evidence}│
+│   │     └─ BE only, confidence < 0.70 ──▶ retry verification with Opus │
+│   ├─ git diff             capture proposed_diff                         │
+│   ├─ evaluate_risk()      LOW / MEDIUM / HIGH / ESCALATE                │
+│   └─ Solution Decision    AUTO_PR / HITL_REQUIRED                       │
+│     │                                                                    │
+│     ├─ AUTO_PR     ──▶ git commit + push → create PR → success comment │
+│     │                     (risk = LOW and severity ≠ CRITICAL)          │
+│     │                     PR sits open — a human still merges it        │
+│     │                                                                    │
+│     └─ HITL_REQUIRED  ──▶ post diff comment → poll for /approve|/reject│
+│                           (risk = MEDIUM/HIGH/ESCALATE, or CRITICAL)    │
+│                               │                                          │
+│                               ├─ /approve ──▶ git commit + push → PR   │
+│                               ├─ /reject  ──▶ delete branch, ack       │
+│                               └─ timeout   ──▶ delete branch, notify   │
+├─── except Exception ──────────────────────────────────────────────────┤
+│   post "❌ Pipeline crashed: <type>: <message>" comment to the issue    │
+│   (e.g. the live #29 GitHub 422 — PR already existed for the branch,   │
+│   now caught here instead of dying silently in the background thread)  │
+├─── finally ────────────────────────────────────────────────────────────┤
+│   CostTracker.summary()   💰 print to stdout + post to Slack thread    │
+│   runs for every path above except the dedup-skip — success, not-a-bug,│
+│   HITL reject/timeout, or crash all still get a cost breakdown          │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-Note there's no branch anywhere in this diagram that calls a merge API — `create_pr()` is the last thing the agent ever does *to GitHub* for a given issue; `CostTracker.summary()` is the last thing it does at all.
+Note there's no branch anywhere in this diagram that calls a merge API — `create_pr()` is the last thing the agent ever does *to GitHub* for a given issue. `CostTracker.summary()` is the last thing it does at all, in every path that reaches the `try` block.
 
 ---
 
@@ -479,14 +520,14 @@ Note there's no branch anywhere in this diagram that calls a merge API — `crea
 |------|---------------|
 | `agent/main.py` | CLI entry: `--issue N` or `--serve` |
 | `agent/webhook_server.py` | FastAPI on :9090, HMAC validation, thread dispatch |
-| `agent/orchestrator.py` | Pipeline coordinator, severity routing, status notifications |
+| `agent/orchestrator.py` | Pipeline coordinator — dedup check, severity routing, crash handling, status notifications |
 | `agent/triage.py` | Haiku parse → Haiku reproduce → Haiku root cause → Haiku classify |
 | `agent/solve.py` | Haiku fix loop, verify fix, diff capture, autonomy routing, PR/HITL |
 | `agent/autonomy.py` | `evaluate_risk()` + `evaluate_autonomy()` — pure functions |
 | `agent/hitl.py` | Poll GitHub comments for `/approve` or `/reject` |
 | `agent/cost_tracker.py` | `CostTracker` — per-model token accumulation, pricing table, `summary()` |
 | `agent/models.py` | `BugContext`, `Severity`, `RiskLevel`, `AutonomyDecision` |
-| `agent/tools/github_tools.py` | `GitHubClient` — issue fetch, comment post, label, PR create, commit author lookup, file top authors |
+| `agent/tools/github_tools.py` | `GitHubClient` — issue fetch, comment post, label, PR create, open-PR-for-branch lookup (dedup), commit author lookup, file top authors |
 | `agent/tools/shell_tools.py` | `run_shell()`, `git_diff()`, `git_find_introducer_sha()` |
 | `agent/tools/file_tools.py` | `read_file()`, `write_file()` |
 
