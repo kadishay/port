@@ -61,6 +61,16 @@ _TRIAGE_TOOLS = [
 ]
 
 
+_FRONTEND_KEYWORDS = ("kanban", "frontend", "ui", "vue", "view", "button", "click", "drag", "display", "bucket", "column")
+_BACKEND_KEYWORDS = ("reminder", "email", "cron", "api", "webhook", "query", "migration", "go", "backend")
+
+def _is_frontend_bug(title: str) -> bool:
+    t = title.lower()
+    fe = sum(1 for kw in _FRONTEND_KEYWORDS if kw in t)
+    be = sum(1 for kw in _BACKEND_KEYWORDS if kw in t)
+    return fe >= be  # default to frontend on tie
+
+
 def run_triage(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugContext:
     print(f"[triage] #{ctx.issue_number} — parsing reproduction steps", flush=True)
     ctx.reproduction_steps = _parse_reproduction_steps(ctx, tracker)
@@ -119,7 +129,7 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
     vikunja_password = os.environ.get("VIKUNJA_PASSWORD", "")
     auth_header = f"-H 'Authorization: Bearer {api_token}'" if api_token else ""
 
-    is_ui_bug = any(kw in ctx.issue_title.lower() for kw in ("frontend", "ui", "kanban", "vue", "display", "button", "click", "drag"))
+    is_ui_bug = _is_frontend_bug(ctx.issue_title)
     use_browser = playwright_enabled() and is_ui_bug
 
     login_instruction = ""
@@ -138,14 +148,22 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
             f"Vikunja repo: {ctx.repo_path}\n"
             f"Vikunja API: {os.environ.get('VIKUNJA_API_BASE', 'http://localhost:3456')}\n"
             f"API auth header: {auth_header}\n\n"
+            f"BUG TYPE: {'FRONTEND (TypeScript/Vue)' if is_ui_bug else 'BACKEND (Go)'}\n\n"
             "RULES:\n"
             "- Do NOT try to create new tasks or users — use existing data.\n"
             "- macOS date syntax: use $(date -v+1d +%s) for 'tomorrow', NOT date -d.\n"
-            "- For backend bugs: use run_shell (curl with auth header) AND read_file on the "
-            "most relevant source file in the repo. Do NOT use browser tools.\n"
-            "- For UI/frontend bugs: use the browser_* tools. "
-            f"{login_instruction}"
-            "Take a browser_screenshot after demonstrating the bug.\n"
+            + (
+                f"- This is a FRONTEND bug. Search {ctx.repo_path}/frontend/src/ for .ts/.vue files. "
+                f"Do NOT read .go files. "
+                + (f"{login_instruction}Use browser_* tools to reproduce visually. "
+                   "Take a browser_screenshot after demonstrating the bug.\n"
+                   if use_browser else
+                   f"Run: find {ctx.repo_path}/frontend/src/stores -name '*.ts' | head -10, "
+                   "then read_file the most relevant TypeScript store file.\n")
+                if is_ui_bug else
+                "- This is a BACKEND bug. Use run_shell (curl with auth header) AND read_file on the "
+                "most relevant source file in pkg/models/. Do NOT use browser tools.\n"
+            ) +
             "- Stop after 4 tool calls. Summarize what you observed."
         ),
     }]
@@ -234,26 +252,26 @@ _ROOT_CAUSE_TOOLS = [
 
 
 def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, float, list[str], str]:
-    # Haiku is fast (~5-10s) and sufficient for single-file logic bugs.
-    # Opus was 30-60s+ with thinking; switched to Haiku + capped at 5 iterations.
+    is_fe = _is_frontend_bug(ctx.issue_title)
+    search_dir = f"{ctx.repo_path}/frontend/src" if is_fe else f"{ctx.repo_path}/pkg/models"
+    file_ext = "*.ts or *.vue" if is_fe else "*.go"
+    bug_type = "FRONTEND (TypeScript/Vue)" if is_fe else "BACKEND (Go)"
+
     messages = [{
         "role": "user",
         "content": (
             f"Find the root cause of this Vikunja bug. Use up to 6 tool calls. Work systematically:\n\n"
+            f"BUG TYPE: {bug_type}\n"
+            f"SEARCH DIRECTORY: {search_dir}\n"
+            f"FILE TYPES: {file_ext} ONLY — do NOT read files of other types.\n\n"
             f"SEARCH STRATEGY (follow in order):\n"
-            f"1. CLASSIFY — decide if this is a frontend (UI/Kanban/Vue/browser) or backend (API/Go/cron) bug.\n"
-            f"   Frontend bugs: search {ctx.repo_path}/frontend/src/ first (*.ts, *.vue files).\n"
-            f"   Backend bugs: search {ctx.repo_path}/pkg/models/ first (*.go files).\n"
-            f"2. FILENAME FIRST — extract 2-3 feature keywords from the issue title, then find files "
-            f"whose NAME matches in the correct directory:\n"
-            f"   find <correct_dir> -name '*<keyword>*' | grep -v test | grep -v node_modules\n"
-            f"   Example: 'kanban done bucket' → frontend bug → find frontend/src -name '*kanban*'\n"
-            f"   Example: 'overdue reminder' → backend bug → find pkg/models -name '*reminder*'\n"
-            f"3. READ THE FILE — read_file the best candidate. Look for the specific wrong value/condition.\n"
-            f"4. IF UNCERTAIN — if you can't spot the bug in the first file, search for one more related file "
-            f"and read it. Confidence below 0.75 means keep looking.\n"
-            f"5. PINPOINT — identify the exact wrong string/value (the 'buggy_pattern') so the fix is 1 line.\n\n"
-            f"NEVER read a _test.go, _test.ts, or swagger/node_modules file.\n\n"
+            f"1. FILENAME FIRST — find files whose NAME contains a keyword from the issue title:\n"
+            f"   find {search_dir} -name '*<keyword>*' | grep -v test | grep -v node_modules\n"
+            f"2. READ THE FILE — read_file the best candidate. Look for the specific wrong value/condition.\n"
+            f"3. IF UNCERTAIN — if you can't spot the bug in the first file, search for one more.\n"
+            f"   Confidence below 0.75 means keep looking.\n"
+            f"4. PINPOINT — identify the exact wrong string/value (the 'buggy_pattern') so the fix is 1 line.\n\n"
+            f"NEVER read _test files, swagger, or node_modules.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Repo: {ctx.repo_path}\n\n"
             f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
