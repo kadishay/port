@@ -274,6 +274,10 @@ def _push_and_open_pr(ctx: BugContext, gh: GitHubClient) -> BugContext:
 
 
 def _create_fix_branch(repo_path: str, branch: str) -> None:
+    # Always branch from main so we don't accidentally build on a previous fix branch
+    run_shell(f"git -C {repo_path} checkout main")
+    # Delete stale branch from a previous failed run, if any
+    run_shell(f"git -C {repo_path} branch -D {branch}")
     run_shell(f"git -C {repo_path} checkout -b {branch}")
 
 

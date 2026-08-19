@@ -328,23 +328,30 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         tracker.record(response.model, response.usage)
 
         if response.stop_reason == "end_turn":
-            # Check if the response is already valid JSON; if not, force one more round
             _text = next((b.text for b in response.content if b.type == "text"), "")
             try:
                 _extract_json(_text)
                 break  # Valid JSON — done
             except Exception:
-                pass  # Prose response — fall through to force JSON below
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": [{
-                "type": "text",
-                "text": (
-                    "Stop. Output ONLY valid JSON now. No prose, no markdown, no explanation.\n"
-                    '{"root_cause": "one sentence", "confidence": 0.XX, "files": ["relative/path"], "buggy_pattern": "exact wrong string"}'
-                ),
-            }]})
+                pass  # Prose response — extract JSON via a fresh call with no tool history
+
+            # Fresh call: no tool history so the model can't keep doing tool_use
             response = client.messages.create(
-                model="claude-haiku-4-5", max_tokens=256, messages=messages,
+                model="claude-haiku-4-5",
+                max_tokens=512,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Convert this bug analysis to JSON only. "
+                        "No prose, no markdown fences, no explanation — just the JSON object.\n\n"
+                        f"Analysis:\n{_text[:3000]}\n\n"
+                        "Output exactly this shape (fill in real values from the analysis above):\n"
+                        '{"root_cause": "one-sentence description of the exact bug", '
+                        '"confidence": 0.90, '
+                        '"files": ["relative/path/from/repo/root.ts"], '
+                        '"buggy_pattern": "exact wrong string or condition from the source code"}'
+                    ),
+                }],
             )
             tracker.record(response.model, response.usage)
             break
@@ -376,24 +383,33 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
     else:
         # Exhausted iterations — force a final JSON-only response with no tools
         messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": [{
-            "type": "text",
-            "text": (
-                "Stop. Output ONLY valid JSON. No prose, no code blocks, no explanation. "
-                "Your entire response must be parseable by json.loads().\n"
-                '{"root_cause": "one sentence", "confidence": 0.XX, "files": ["relative/path/to/file"], "buggy_pattern": "exact wrong string from source"}'
-            ),
-        }]})
+        # Exhausted iterations — summarise what we know into a fresh JSON-only call
+        last_prose = next(
+            (b.text for b in response.content if b.type == "text"), ""
+        ) or "no text returned"
         response = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=256,
-            messages=messages,
+            max_tokens=512,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Convert this bug analysis to JSON only. "
+                    "No prose, no markdown fences, no explanation — just the JSON object.\n\n"
+                    f"Analysis:\n{last_prose[:3000]}\n\n"
+                    "Output exactly this shape (fill in real values from the analysis above):\n"
+                    '{"root_cause": "one-sentence description of the exact bug", '
+                    '"confidence": 0.90, '
+                    '"files": ["relative/path/from/repo/root.ts"], '
+                    '"buggy_pattern": "exact wrong string or condition from the source code"}'
+                ),
+            }],
         )
         tracker.record(response.model, response.usage)
 
     text = next((b.text for b in response.content if b.type == "text"), None)
     if not text:
         raise ValueError(f"Root cause analysis returned no text. Content types: {[b.type for b in response.content]}")
+    print(f"[triage] root-cause response text (first 300 chars): {text[:300]!r}", flush=True)
     try:
         data = _extract_json(text)
     except Exception as e:

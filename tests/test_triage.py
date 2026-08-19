@@ -1,5 +1,6 @@
 from unittest.mock import patch, MagicMock
 from agent.models import BugContext, Severity
+from agent.cost_tracker import CostTracker
 
 
 def _end_turn(text: str):
@@ -36,7 +37,7 @@ def test_triage_sets_severity_high(mock_client, mock_gh_class, mock_people, tmp_
         repo_path=str(tmp_path),
     )
 
-    result = run_triage(ctx, mock_gh)
+    result = run_triage(ctx, mock_gh, CostTracker())
 
     assert result.severity == Severity.HIGH
     assert result.confidence == 0.92

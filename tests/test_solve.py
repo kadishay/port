@@ -1,5 +1,6 @@
 from unittest.mock import patch, MagicMock
 from agent.models import BugContext, Severity, AutonomyDecision
+from agent.cost_tracker import CostTracker
 
 
 def _ctx(**kwargs):
@@ -32,7 +33,7 @@ def test_auto_merge_creates_pr(mock_client, mock_shell, mock_diff, mock_autonomy
     )
     mock_gh = MagicMock()
     ctx = _ctx()
-    result = run_solve(ctx, mock_gh)
+    result = run_solve(ctx, mock_gh, CostTracker())
     assert result.autonomy_decision == AutonomyDecision.AUTO_MERGE
     mock_gh.create_pr.assert_called_once()
 
@@ -47,6 +48,6 @@ def test_hitl_rejected_skips_pr(mock_client, mock_shell, mock_diff, mock_approva
     mock_client.messages.create.return_value = _end_turn("Apply this fix.")
     mock_gh = MagicMock()
     ctx = _ctx(severity=Severity.CRITICAL)
-    result = run_solve(ctx, mock_gh)
+    result = run_solve(ctx, mock_gh, CostTracker())
     mock_gh.create_pr.assert_not_called()
     mock_gh.post_comment.assert_called()
