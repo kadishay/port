@@ -132,6 +132,12 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
     is_ui_bug = _is_frontend_bug(ctx.issue_title)
     use_browser = playwright_enabled() and is_ui_bug
 
+    if is_ui_bug:
+        path = "frontend + Playwright" if use_browser else "frontend (no Playwright — PLAYWRIGHT_ENABLED=false)"
+    else:
+        path = "backend"
+    print(f"[triage] #{ctx.issue_number} — reproduce path: {path}", flush=True)
+
     login_instruction = ""
     if use_browser and vikunja_username and vikunja_password:
         login_instruction = (
