@@ -139,10 +139,26 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
             f"username '{vikunja_username}' and password '{vikunja_password}'. "
         )
 
+    max_tool_calls = 8 if use_browser else 4
+    kanban_hint = (
+        "\nKANBAN NAVIGATION STEPS:\n"
+        "1. browser_navigate http://localhost:4173\n"
+        f"2. Log in: fill '#username' with '{vikunja_username}', fill '#password' with '{vikunja_password}', click 'button[type=submit]'\n"
+        "3. browser_wait 2000ms for redirect after login\n"
+        "4. browser_navigate http://localhost:4173/projects/3/20  (project 3, Kanban view 20)\n"
+        "5. browser_wait 2000ms for Kanban columns to load\n"
+        f"6. browser_screenshot 'bug-{ctx.issue_number}-before-action.png' — capture Kanban with task in its bucket\n"
+        "7. Find a task checkbox: look for 'input.task-checkbox', '.task-list-item .done-checkbox', or '.task .checkbox'\n"
+        "   Click the checkbox for any task that is NOT in the Done column\n"
+        "8. browser_wait 1500ms for the UI to update\n"
+        f"9. browser_screenshot 'bug-{ctx.issue_number}-before.png' — shows bug: task did NOT move to Done column\n"
+        if (use_browser and "kanban" in ctx.issue_title.lower()) else ""
+    )
+
     messages = [{
         "role": "user",
         "content": (
-            f"Investigate this bug in at most 4 tool calls total, then stop.\n\n"
+            f"Investigate this bug in at most {max_tool_calls} tool calls total, then stop.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Steps:\n{steps}\n\n"
             f"Vikunja repo: {ctx.repo_path}\n"
@@ -156,7 +172,8 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
                 f"- This is a FRONTEND bug. Search {ctx.repo_path}/frontend/src/ for .ts/.vue files. "
                 f"Do NOT read .go files. "
                 + (f"{login_instruction}Use browser_* tools to reproduce visually. "
-                   "Take a browser_screenshot after demonstrating the bug.\n"
+                   f"{kanban_hint}"
+                   f"Take a final browser_screenshot named 'bug-{ctx.issue_number}-before.png' showing the bug state.\n"
                    if use_browser else
                    f"Run: find {ctx.repo_path}/frontend/src/stores -name '*.ts' | head -10, "
                    "then read_file the most relevant TypeScript store file.\n")
@@ -164,12 +181,12 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
                 "- This is a BACKEND bug. Use run_shell (curl with auth header) AND read_file on the "
                 "most relevant source file in pkg/models/. Do NOT use browser tools.\n"
             ) +
-            "- Stop after 4 tool calls. Summarize what you observed."
+            f"- Stop after {max_tool_calls} tool calls. Summarize what you observed."
         ),
     }]
     log_parts: list[str] = []
     screenshot_paths: list[str] = []
-    max_iterations = 5
+    max_iterations = 9 if use_browser else 5
 
     for iteration in range(max_iterations):
         print(f"[triage] #{ctx.issue_number} — reproduce iteration {iteration + 1}", flush=True)

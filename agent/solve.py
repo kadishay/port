@@ -112,6 +112,22 @@ def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
     if not playwright_enabled() or not ctx.screenshot_before or not ctx.reproduction_steps:
         return
 
+    vikunja_username = os.environ.get("VIKUNJA_USERNAME", "")
+    vikunja_password = os.environ.get("VIKUNJA_PASSWORD", "")
+    is_kanban = "kanban" in (ctx.issue_title or "").lower()
+    kanban_verify = (
+        "\nKANBAN VERIFY STEPS:\n"
+        "1. browser_navigate http://localhost:4173\n"
+        f"2. Log in: fill '#username' with '{vikunja_username}', fill '#password' with '{vikunja_password}', click 'button[type=submit]'\n"
+        "3. browser_wait 2000ms\n"
+        "4. browser_navigate http://localhost:4173/projects/3/20  (project 3, Kanban view 20)\n"
+        "5. browser_wait 2000ms for Kanban columns to load\n"
+        "6. Find a task that is NOT in the Done column. Click its checkbox.\n"
+        "7. browser_wait 2000ms for animation to complete\n"
+        f"8. browser_screenshot 'bug-{ctx.issue_number}-after.png' — should show task moved to Done column (fix works!)\n"
+        if is_kanban else ""
+    )
+
     messages = [{
         "role": "user",
         "content": (
@@ -120,12 +136,13 @@ def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
             f"Root cause that was fixed: {ctx.root_cause}\n\n"
             f"Original reproduction steps:\n{ctx.reproduction_steps}\n\n"
             f"Vikunja frontend: http://localhost:4173\n"
-            f"Re-run the steps and confirm the bug is gone. "
+            f"{kanban_verify}"
+            "Re-run the steps and confirm the bug is gone. "
             f"Take a screenshot named 'bug-{ctx.issue_number}-after.png' showing the fixed state."
         ),
     }]
 
-    while True:
+    for _ in range(12):
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=4096,
