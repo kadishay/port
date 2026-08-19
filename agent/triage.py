@@ -301,11 +301,27 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
+    else:
+        # Exhausted iterations — force a final JSON-only response with no tools
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": [{
+            "type": "text",
+            "text": 'You have used all tool calls. Now respond with ONLY the JSON diagnosis based on what you found:\n{"root_cause": "...", "confidence": 0.XX, "files": ["relative/path"], "buggy_pattern": "exact wrong string"}',
+        }]})
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=512,
+            messages=messages,
+        )
+        tracker.record(response.model, response.usage)
 
     text = next((b.text for b in response.content if b.type == "text"), None)
     if not text:
-        raise ValueError(f"Opus returned no text block. Content types: {[b.type for b in response.content]}")
-    data = _extract_json(text)
+        raise ValueError(f"Root cause analysis returned no text. Content types: {[b.type for b in response.content]}")
+    try:
+        data = _extract_json(text)
+    except Exception as e:
+        raise ValueError(f"Root cause JSON parse failed: {e}\nRaw text: {text[:500]}")
     return (
         data["root_cause"],
         float(data["confidence"]),
