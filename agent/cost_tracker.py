@@ -22,6 +22,9 @@ class CostTracker:
         self._input[key] = self._input.get(key, 0) + usage.input_tokens
         self._output[key] = self._output.get(key, 0) + usage.output_tokens
 
+    def models_used(self) -> set[str]:
+        return set(self._input) | set(self._output)
+
     def total_cost(self) -> float:
         total = 0.0
         for model in set(list(self._input) + list(self._output)):
