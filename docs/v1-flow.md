@@ -15,6 +15,7 @@ Open items:
 2. DONE — see "4b². Verify the Fix Actually Works" below. FE: Playwright before/after screenshots (human eyeballs it, no pass/fail). BE: curl re-run + forced report_verification tool call → ctx.fix_verified bool + ctx.verification_log evidence.
 2. b. DONE — BE verify now reports a confidence score too (`ctx.verification_confidence`), same 0.70 Opus-retry threshold as root cause. FE verify stays screenshot-only (no model confidence to gate on).
 3. seems like the agent have a big hint on how to solve the kanban bug: KANBAN VERIFY STEPS (follow exactly)
+4. DONE — see "2b². Check Reproduction Success" below + Demo Bug 3. Note the "Known limitation" callout in that section — this one isn't as reliable as the others (~2/3 in live testing), it's a genuinely hard problem for a cheap model, not fully solved.
 -->
 
 ## Entry Points
@@ -80,7 +81,7 @@ GitHub POST /webhook
 
 `agent/triage.py` → `run_triage(ctx, gh)`
 
-Triage runs five sequential sub-steps across two models:
+Triage runs six sequential sub-steps across two models:
 
 ### 2a. Parse Reproduction Steps (Haiku)
 
@@ -121,6 +122,38 @@ Haiku decides whether to use the browser based on the issue body. For backend bu
 **When `PLAYWRIGHT_ENABLED=false` (default):** browser tools are not offered to the model. Frontend bugs fall back to source code inspection via `read_file`. No Playwright installation required.
 
 **Requires:** `pip install playwright && playwright install chromium` + Vikunja frontend running (`pnpm dev`, port 4173).
+
+### 2b². Check Reproduction Success (Haiku + tool loop, up to 6 iterations)
+
+**Why this step exists:** 2b's reproduce loop has a fixed tool-call budget and might come back inconclusive, or having found the actual bug, or — the case this step is for — having found nothing because there's genuinely no bug to find. Without this step, an inconclusive or empty reproduction log gets handed straight to root-cause analysis (2d), which is *always* asked to find a root cause via a forced tool call and will happily fabricate a plausible-sounding one for a bug that doesn't exist. This step exists to catch that case and stop before it happens.
+
+**Model:** `claude-haiku-4-5` with tools (`read_file`, `run_shell`, capped at 6 iterations)
+**Tool:** `report_reproduction({"reproduced": bool, "confidence": 0.0–1.0, "reason": "..."})`
+
+**How it works:** `_check_reproduction()` starts from the reproduction log 2b already gathered, but isn't limited to it — it can call `read_file`/`run_shell` for up to 6 more iterations if that log is inconclusive, specifically to avoid the failure mode where 2b didn't happen to read the one file that would settle the question. It's told to search broadly (`grep -rl <keyword> <dir>` before reading one file at a time) since related UI components are often split across several similarly-named files (list view, detail view, card view, readonly view).
+
+**The evidence bar** (tuned after this triggered real false positives during testing — see below):
+- `reproduced=true` — either the actual behaviour was directly observed, **or** a *specific, concrete* logic flaw was found (an identifiable wrong condition/operator/value on a particular line). Reading code that clearly contains the buggy logic counts as reproduction — the same standard root-cause analysis already uses; you don't need to have triggered the bug live.
+- `reproduced=false` — **only** if the exact relevant code was found and read, and it's clearly correct: either it matches "Expected behaviour" directly, or it's a complete, intentional-looking implementation (component + data field + rendering logic all exist and connect) with no identifiable defect. Vague suspicion ("might not be wired up", "doesn't explicitly show X") does **not** count — that's speculation from an incomplete search, not a finding.
+- An inconclusive or incomplete search on its own is *not* evidence either way — the model is told to keep digging (up to the iteration cap) rather than guess.
+
+**Fallback:** if all 6 iterations pass without a `report_reproduction` call, `_force_reproduction_verdict()` makes one more forced-tool-call request — reusing the *entire* investigation transcript (every file read, every command run) as context, not just the issue title/body. An earlier version of this fallback passed no context at all and defaulted to "reproduced=true" purely from how the issue *sounded* — this produced false negatives on Demo Bug 3 below and was caught and fixed before shipping.
+
+**If `reproduced=false`:**
+```
+ctx.unable_to_reproduce     = True
+ctx.reproduction_confidence = 0.85
+ctx.reproduction_reason     = "..."
+```
+1. Posts a "🔍 Unable to Reproduce" comment with the confidence and what was observed.
+2. Adds the `cannot-reproduce` label.
+3. **If confidence ≥ 0.85** (`_REPRODUCTION_AUTO_CLOSE_THRESHOLD`, same bar as the LOW-risk/`AUTO_PR` floor used elsewhere): `gh.close_issue()` closes it automatically — `ctx.issue_closed = True`.
+4. **Below 0.85:** the comment says so explicitly and the issue is left open for a human to judge.
+5. Either way, `run_triage()` returns immediately — root cause analysis, severity classification, and the entire solve pipeline are skipped.
+
+**Why 0.85:** it's the same "high confidence" bar the rest of the system already uses for auto-merging a low-risk fix (`_LOW_MIN_CONFIDENCE` in `agent/autonomy.py`) — reusing it keeps "confident enough to act without a human" consistent across the whole pipeline rather than introducing a second, unrelated number to tune.
+
+**Known limitation — surfaced during testing, not fully solved:** getting this right is genuinely hard for a cheap model. Across repeated live runs of Demo Bug 3 (below), this check correctly identified "not reproducible" roughly 2 times out of 3 — the failure mode is the model occasionally finding a plausible-*sounding* but likely-spurious "logic flaw" (e.g. a Vue ref-sync timing concern that reactive bindings actually handle fine) that clears the "specific and concrete" bar without being a real bug. That's an LLM confabulation risk, not a wiring bug, and prompting alone couldn't fully eliminate it within the scope of this iteration. Treat this step as directionally reliable, not perfectly reliable — the same way a human reviewer skimming code for 30 seconds isn't perfectly reliable either.
 
 ### 2c. "Not a Bug" Check (Haiku + tool loop)
 
@@ -469,6 +502,11 @@ orchestrator.py            fetch issue
 │ triage.py                                                                │
 │   ├─ Haiku              parse reproduction steps from issue body        │
 │   ├─ Haiku (tool loop)  run shell/file tools to reproduce the bug       │
+│   ├─ Haiku (tool loop)  did this actually reproduce? (up to 6 more     │
+│   │                     tool calls if inconclusive)                    │
+│   │     └─ reproduced = false ──▶ post "unable to reproduce" comment + │
+│   │           label; confidence ≥ 0.85 → auto-close issue, else leave  │
+│   │           open for a human; STOP (root cause/solve never run)      │
 │   ├─ Haiku (tool loop)  check docs/source → is this expected behaviour?│
 │   │     └─ not_a_bug = true ──▶ post "not a bug" comment + label, stop │
 │   ├─ Haiku (tool loop)  root cause → {root_cause, confidence, ...}     │
@@ -521,13 +559,13 @@ Note there's no branch anywhere in this diagram that calls a merge API — `crea
 | `agent/main.py` | CLI entry: `--issue N` or `--serve` |
 | `agent/webhook_server.py` | FastAPI on :9090, HMAC validation, thread dispatch |
 | `agent/orchestrator.py` | Pipeline coordinator — dedup check, severity routing, crash handling, status notifications |
-| `agent/triage.py` | Haiku parse → Haiku reproduce → Haiku root cause → Haiku classify |
-| `agent/solve.py` | Haiku fix loop, verify fix, diff capture, autonomy routing, PR/HITL |
+| `agent/triage.py` | Haiku parse → reproduce → check-reproduced (+ Opus retry) → not-a-bug → root cause (+ Opus retry) → classify |
+| `agent/solve.py` | Haiku fix loop, verify fix (+ Opus retry), diff capture, autonomy routing, PR/HITL |
 | `agent/autonomy.py` | `evaluate_risk()` + `evaluate_autonomy()` — pure functions |
 | `agent/hitl.py` | Poll GitHub comments for `/approve` or `/reject` |
 | `agent/cost_tracker.py` | `CostTracker` — per-model token accumulation, pricing table, `summary()` |
 | `agent/models.py` | `BugContext`, `Severity`, `RiskLevel`, `AutonomyDecision` |
-| `agent/tools/github_tools.py` | `GitHubClient` — issue fetch, comment post, label, PR create, open-PR-for-branch lookup (dedup), commit author lookup, file top authors |
+| `agent/tools/github_tools.py` | `GitHubClient` — issue fetch, comment post, label, close issue, PR create, open-PR-for-branch lookup (dedup), commit author lookup, file top authors |
 | `agent/tools/shell_tools.py` | `run_shell()`, `git_diff()`, `git_find_introducer_sha()` |
 | `agent/tools/file_tools.py` | `read_file()`, `write_file()` |
 
@@ -537,7 +575,7 @@ Note there's no branch anywhere in this diagram that calls a merge API — `crea
 
 ## Demo Flow (End-to-End Walkthrough)
 
-This is the exact sequence to run for a live demo, using the two pre-introduced bugs.
+This is the exact sequence to run for a live demo, using two pre-introduced bugs (Demo Bugs 1 & 2) and one issue that describes a bug which doesn't actually exist (Demo Bug 3 — see 2b² above).
 
 ### Prerequisites
 
@@ -676,6 +714,54 @@ bash bugs/revert_bugs.sh
 
 ---
 
+### Demo Bug 3 — "Unable to Reproduce" (Set Task Color)
+
+**What makes this one different:** unlike Demo Bugs 1 and 2, there is no code bug to introduce — task color-setting works correctly in this codebase. The issue describes a bug that doesn't exist. This demonstrates the agent recognizing that and stopping, instead of fabricating a fix for something that isn't broken.
+
+**Step 1 — no setup needed.** Don't run `bugs/introduce_bugs.sh` for this scenario specifically (it's fine to have already run it for Demo Bugs 1/2 — that script only touches the BE reminder file and `kanban.ts`, unrelated to color).
+
+**Step 2 — Open a GitHub issue on `kadishay/vikunja`:**
+
+Title:
+```
+Bug: Set color is not working
+```
+
+Body:
+```
+Setting a task color is not working.
+
+Steps to reproduce:
+1. Open a task.
+2. Click set color.
+3. Click on a color selector circle.
+4. Select red color.
+5. Go back to project.
+
+Expected behaviour: red dot will appear next to the task.
+Actual behaviour: no dot appears next to the task.
+```
+
+**What the agent does (automatically, ~30–90s):**
+
+1. Webhook fires → agent receives the issue
+2. **Triage:**
+   - Haiku extracts reproduction steps
+   - Reproduces via source inspection — the title has no strong FE/BE keyword and defaults to frontend on the tie-break (`_is_frontend_bug`); with `PLAYWRIGHT_ENABLED=false` there's no browser, so this is a code-reading investigation
+   - **Reproduction check (2b²):** searches for the color-setting code across `SingleTaskInProject.vue`, `ColorPicker.vue`, `Heading.vue`, `tasks.ts`, etc. — finds a complete, connected implementation (`hexColor` field, color picker component, `v-if="task.hexColor !== ''"` rendering) with no identifiable defect
+   - Reports `reproduced=false`, typically confidence 0.75–0.90 in practice
+3. **Outcome:**
+   - Posts a "🔍 Unable to Reproduce" comment with the finding
+   - Adds the `cannot-reproduce` label
+   - Confidence ≥ 0.85 → closes the issue automatically; below that → leaves it open with the finding for a human to confirm
+   - **Root cause analysis and the entire solve pipeline never run** — no branch, no PR, no fix proposed
+
+**Heads up before you demo this live:** per the "Known limitation" note in 2b², this doesn't land on `reproduced=false` every single time (~2/3 in repeated live testing) — the other ~1/3 it finds a plausible-but-likely-spurious "logic flaw" and proceeds into root-cause analysis instead, producing a (probably wrong) proposed fix for a working feature. If you want a guaranteed outcome for a live audience, dry-run this one once beforehand; if it goes the other way, that's also a legitimate — if less clean — demonstration of the confidence-gating elsewhere in the pipeline still catching a weak, low-confidence root cause before it becomes an `AUTO_PR`.
+
+**To reset:** nothing to reset — no code was changed. If the issue got auto-closed, just reopen it to run the demo again (the webhook dispatches on `reopened` too — see Step 0).
+
+---
+
 ### Demo: HITL Path (optional)
 
 To demonstrate the human-in-the-loop flow, temporarily lower the confidence threshold or edit `autonomy.py` to force `HITL_REQUIRED`. The agent will:
@@ -698,6 +784,7 @@ To demonstrate the human-in-the-loop flow, temporarily lower the confidence thre
 | PR opened | `kadishay/vikunja` → pull requests |
 | Success comment | GitHub issue → final comment with PR link |
 | Merging the PR | Manual — click "Merge pull request" yourself. The agent stops at opening it, in every path, including `AUTO_PR`. |
+| "Unable to reproduce" comment (Demo 3) | GitHub issue → comments, within ~30–90s — may auto-close the issue (confidence ≥ 0.85) or leave it open with the `cannot-reproduce` label |
 
 ---
 
