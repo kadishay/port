@@ -1,4 +1,6 @@
+import os
 import random
+import requests
 
 from agent.models import AutonomyDecision, BugContext, RiskLevel
 from agent.cost_tracker import CostTracker
@@ -63,3 +65,31 @@ def build_row(ctx: BugContext, tracker: CostTracker, duration_seconds: float, cr
     }
     row.update(mock_human_outcomes(ctx.risk_level, ctx.autonomy_decision))
     return row
+
+
+_SUPABASE_TABLE = "bug_runs"
+
+
+def record_run(ctx: BugContext, tracker: CostTracker, duration_seconds: float, crashed: bool = False) -> None:
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    if not url or not key:
+        print(f"[telemetry] SUPABASE_URL/SUPABASE_SERVICE_KEY not set — skipping telemetry write for #{ctx.issue_number}", flush=True)
+        return
+
+    row = build_row(ctx, tracker, duration_seconds, crashed)
+    try:
+        r = requests.post(
+            f"{url}/rest/v1/{_SUPABASE_TABLE}",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json=row,
+            timeout=10,
+        )
+        r.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[telemetry] failed to record run for #{ctx.issue_number}: {e}", flush=True)

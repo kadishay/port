@@ -134,3 +134,55 @@ def test_build_row_opus_fallback_used_true_when_opus_recorded():
     tracker.record("claude-opus-4-8-20260101", MagicMock(input_tokens=1, output_tokens=1))
     row = build_row(ctx, tracker, duration_seconds=1.0, crashed=False)
     assert row["opus_fallback_used"] is True
+
+
+import responses as resp_mock
+from agent.telemetry import record_run
+
+
+@resp_mock.activate
+def test_record_run_posts_to_supabase(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "test-key")
+    resp_mock.add(
+        resp_mock.POST,
+        "https://example.supabase.co/rest/v1/bug_runs",
+        status=201,
+    )
+    ctx = _ctx(pr_url="https://github.com/x/y/pull/9")
+    tracker = CostTracker()
+
+    record_run(ctx, tracker, duration_seconds=5.0)
+
+    assert len(resp_mock.calls) == 1
+    sent = resp_mock.calls[0].request
+    assert sent.headers["apikey"] == "test-key"
+    assert sent.headers["Authorization"] == "Bearer test-key"
+
+
+def test_record_run_skips_silently_when_env_missing(monkeypatch, capsys):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    ctx = _ctx()
+    tracker = CostTracker()
+
+    record_run(ctx, tracker, duration_seconds=5.0)  # must not raise
+
+    assert "skipping telemetry" in capsys.readouterr().out
+
+
+@resp_mock.activate
+def test_record_run_swallows_request_errors(monkeypatch, capsys):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "test-key")
+    resp_mock.add(
+        resp_mock.POST,
+        "https://example.supabase.co/rest/v1/bug_runs",
+        status=500,
+    )
+    ctx = _ctx()
+    tracker = CostTracker()
+
+    record_run(ctx, tracker, duration_seconds=5.0)  # must not raise despite 500
+
+    assert "failed to record run" in capsys.readouterr().out
