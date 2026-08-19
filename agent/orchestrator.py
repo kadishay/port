@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from agent.models import BugContext
 from agent.tools.github_tools import GitHubClient
@@ -34,6 +34,7 @@ def _refresh_vikunja_token() -> None:
 
 
 def run_pipeline(issue_number: int) -> BugContext:
+    load_dotenv(override=True)  # Re-read .env on every run so live server picks up changes
     _refresh_vikunja_token()
     gh = GitHubClient()
     issue = gh.get_issue(issue_number)
