@@ -7,6 +7,8 @@ from agent.tools.github_tools import GitHubClient
 from agent.triage import run_triage
 from agent.solve import run_solve
 from agent.cost_tracker import CostTracker
+import time
+from agent.telemetry import record_run
 
 
 def _refresh_vikunja_token() -> None:
@@ -55,9 +57,11 @@ def run_pipeline(issue_number: int) -> BugContext | None:
     )
 
     tracker = CostTracker()
+    start = time.time()
     thread_ts = _notify(f"📥 Issue #{issue_number} received: *{issue['title']}* — starting triage")
     ctx.slack_thread_ts = thread_ts or ""
 
+    crashed = False
     try:
         ctx = run_triage(ctx, gh, tracker)
 
@@ -92,6 +96,7 @@ def run_pipeline(issue_number: int) -> BugContext | None:
         else:
             _notify_thread(ctx, f"⚠️ Fix aborted or rejected. Decision: {ctx.autonomy_decision.value}")
     except Exception as e:
+        crashed = True
         error_msg = f"❌ Pipeline crashed: {type(e).__name__}: {e}"
         print(f"[orchestrator] #{issue_number} — {error_msg}", flush=True)
         gh.post_comment(issue_number, error_msg)
@@ -100,6 +105,7 @@ def run_pipeline(issue_number: int) -> BugContext | None:
         cost_summary = tracker.summary()
         print(cost_summary, flush=True)
         _notify_thread(ctx, cost_summary)
+        record_run(ctx, tracker, time.time() - start, crashed=crashed)
 
     return ctx
 
