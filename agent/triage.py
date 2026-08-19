@@ -241,20 +241,19 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         "content": (
             f"Find the root cause of this Vikunja bug. Use up to 6 tool calls. Work systematically:\n\n"
             f"SEARCH STRATEGY (follow in order):\n"
-            f"1. FILENAME FIRST — extract 2-3 feature keywords from the issue title, then find files "
-            f"whose NAME matches:\n"
-            f"   find {ctx.repo_path}/pkg/models {ctx.repo_path}/frontend/src "
-            f"-name '*<keyword>*' | grep -v test | grep -v swagger\n"
-            f"   Example: 'overdue reminder emails' → find files named *overdue* or *reminder*\n"
-            f"   Example: 'kanban done bucket' → find files named *kanban* or *bucket*\n"
-            f"2. CONTENT GREP — if filename search finds nothing, grep for the feature term inside files:\n"
-            f"   grep -rl '<keyword>' {ctx.repo_path}/pkg/models/ {ctx.repo_path}/frontend/src/ "
-            f"--include='*.go' --include='*.ts' --exclude='*_test*' --exclude='*swagger*' | head -10\n"
+            f"1. CLASSIFY — decide if this is a frontend (UI/Kanban/Vue/browser) or backend (API/Go/cron) bug.\n"
+            f"   Frontend bugs: search {ctx.repo_path}/frontend/src/ first (*.ts, *.vue files).\n"
+            f"   Backend bugs: search {ctx.repo_path}/pkg/models/ first (*.go files).\n"
+            f"2. FILENAME FIRST — extract 2-3 feature keywords from the issue title, then find files "
+            f"whose NAME matches in the correct directory:\n"
+            f"   find <correct_dir> -name '*<keyword>*' | grep -v test | grep -v node_modules\n"
+            f"   Example: 'kanban done bucket' → frontend bug → find frontend/src -name '*kanban*'\n"
+            f"   Example: 'overdue reminder' → backend bug → find pkg/models -name '*reminder*'\n"
             f"3. READ THE FILE — read_file the best candidate. Look for the specific wrong value/condition.\n"
             f"4. IF UNCERTAIN — if you can't spot the bug in the first file, search for one more related file "
             f"and read it. Confidence below 0.75 means keep looking.\n"
             f"5. PINPOINT — identify the exact wrong string/value (the 'buggy_pattern') so the fix is 1 line.\n\n"
-            f"NEVER read a _test.go, _test.ts, or swagger file.\n\n"
+            f"NEVER read a _test.go, _test.ts, or swagger/node_modules file.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Repo: {ctx.repo_path}\n\n"
             f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
@@ -306,11 +305,15 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": [{
             "type": "text",
-            "text": 'You have used all tool calls. Now respond with ONLY the JSON diagnosis based on what you found:\n{"root_cause": "...", "confidence": 0.XX, "files": ["relative/path"], "buggy_pattern": "exact wrong string"}',
+            "text": (
+                "Stop. Output ONLY valid JSON. No prose, no code blocks, no explanation. "
+                "Your entire response must be parseable by json.loads().\n"
+                '{"root_cause": "one sentence", "confidence": 0.XX, "files": ["relative/path/to/file"], "buggy_pattern": "exact wrong string from source"}'
+            ),
         }]})
         response = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=512,
+            max_tokens=256,
             messages=messages,
         )
         tracker.record(response.model, response.usage)
