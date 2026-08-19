@@ -17,10 +17,21 @@ client = anthropic.Anthropic()
 
 def _extract_json(text: str) -> dict:
     import re
-    # Try to find a JSON object in the text
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        return json.loads(match.group())
+    # Walk from each '{"' (JSON object start), balance braces to find the complete object.
+    # This avoids grabbing Go/TS code blocks that also contain '{'.
+    for m in re.finditer(r'\{"', text):
+        start = m.start()
+        depth = 0
+        for i, ch in enumerate(text[start:]):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:start + i + 1])
+                    except json.JSONDecodeError:
+                        break  # try next '{"'
     # Fallback: strip markdown fences and parse
     cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(cleaned)

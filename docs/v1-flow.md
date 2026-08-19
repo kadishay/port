@@ -131,10 +131,10 @@ This check runs before Opus to avoid spending expensive tokens on issues that ar
 Haiku reads the most relevant source file(s) via `read_file` (up to 2 reads), then returns a JSON diagnosis. For single-file logic bugs the root cause is apparent from the code — deep reasoning isn't needed. Haiku completes this in ~5–10s vs 30–60s+ for Opus with adaptive thinking, at ~5× lower cost. The confidence score (0.0–1.0) reflects how certain Haiku is. The `files` and `buggy_pattern` fields are used by the next step to trace authorship.
 
 ```
-ctx.root_cause     = "The overdue window uses time.Hour*38 instead of time.Hour*14..."
-ctx.confidence     = 0.92
+ctx.root_cause     = "The done filter uses 'done = true' instead of 'done = false'..."
+ctx.confidence     = 0.95
 ctx.affected_files = ["pkg/models/task_overdue_reminder.go"]
-ctx.buggy_pattern  = "time.Hour*38"
+ctx.buggy_pattern  = "done = true"
 ```
 
 ### 2e. Find Relevant People (git + GitHub API)
@@ -475,21 +475,21 @@ bash bugs/introduce_bugs.sh
 
 Title:
 ```
-Bug: marking task as done in Kanban view does not move it to the Done bucket
+Bug: Marking a task as done in Kanban view does not move it to the Done bucket
 ```
 
 Body:
 ```
-## Description
-In Kanban view, checking a task as done leaves it in its current bucket 
+##Description
+In Kanban view, checking a task as done leaves it in its current bucket
 instead of moving it to the configured Done bucket.
 
-## Reproduction
-1. Open Kanban view
-2. Create a task in any non-done bucket
-3. Check the task as done
-4. Expected: task moves to the Done column
-5. Actual: task stays in its original bucket
+##Reproduction
+Open Kanban view
+Create a task in any non-done bucket
+Check the task as done
+Expected: task moves to the Done column
+Actual: task stays in its original bucket
 ```
 
 **What the agent does (automatically, ~2–3 minutes):**
