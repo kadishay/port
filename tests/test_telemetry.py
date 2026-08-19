@@ -53,14 +53,14 @@ def test_derive_pipeline_outcome_fixed_auto_pr_when_pr_url_set():
     assert derive_pipeline_outcome(ctx, crashed=False) == "fixed_auto_pr"
 
 
-def test_derive_pipeline_outcome_hitl_rejected_when_hitl_and_no_pr():
+def test_derive_pipeline_outcome_hitl_no_pr_when_hitl_and_no_pr():
     ctx = _ctx(autonomy_decision=AutonomyDecision.HITL_REQUIRED, pr_url="")
-    assert derive_pipeline_outcome(ctx, crashed=False) == "hitl_rejected"
+    assert derive_pipeline_outcome(ctx, crashed=False) == "hitl_no_pr"
 
 
-def test_derive_pipeline_outcome_hitl_pending_fallback():
+def test_derive_pipeline_outcome_no_pr_opened_fallback():
     ctx = _ctx(autonomy_decision=AutonomyDecision.AUTO_PR, pr_url="")
-    assert derive_pipeline_outcome(ctx, crashed=False) == "hitl_pending"
+    assert derive_pipeline_outcome(ctx, crashed=False) == "no_pr_opened"
 
 
 def test_mock_human_outcomes_low_risk_auto_pr_favors_merge(monkeypatch):
@@ -125,6 +125,15 @@ def test_build_row_pr_url_is_none_when_empty():
     tracker = CostTracker()
     row = build_row(ctx, tracker, duration_seconds=1.0, crashed=False)
     assert row["pr_url"] is None
+
+
+def test_build_row_human_outcomes_null_when_no_pr():
+    ctx = _ctx()
+    tracker = CostTracker()
+    row = build_row(ctx, tracker, duration_seconds=1.0, crashed=False)
+    assert row["human_rejected"] is None
+    assert row["human_merged_as_is"] is None
+    assert row["human_added_comment"] is None
 
 
 def test_build_row_opus_fallback_used_true_when_opus_recorded():

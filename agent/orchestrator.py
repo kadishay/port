@@ -102,10 +102,10 @@ def run_pipeline(issue_number: int) -> BugContext | None:
         gh.post_comment(issue_number, error_msg)
         _notify_thread(ctx, error_msg)
     finally:
+        record_run(ctx, tracker, time.time() - start, crashed=crashed)
         cost_summary = tracker.summary()
         print(cost_summary, flush=True)
         _notify_thread(ctx, cost_summary)
-        record_run(ctx, tracker, time.time() - start, crashed=crashed)
 
     return ctx
 

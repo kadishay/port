@@ -135,6 +135,12 @@
   const RISK_ORDER = ["LOW", "MEDIUM", "HIGH", "ESCALATE"];
   const ORDINAL_COLORS = ["var(--ord-1)", "var(--ord-2)", "var(--ord-3)", "var(--ord-4)"];
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
   function bar(label, valueLabel, fraction, color) {
     const row = document.createElement("div");
     row.className = "bar-row";
@@ -156,14 +162,15 @@
   function renderStats(runs) {
     const el = document.getElementById("stats");
     el.innerHTML = "";
+    const withOutcome = runs.filter(r => r.human_merged_as_is !== null);
     const avgCost = runs.length ? runs.reduce((s, r) => s + r.cost_usd, 0) / runs.length : 0;
     const avgDuration = runs.length ? runs.reduce((s, r) => s + r.duration_seconds, 0) / runs.length : 0;
-    const merged = runs.filter(r => r.human_merged_as_is).length;
+    const merged = withOutcome.filter(r => r.human_merged_as_is).length;
     el.append(
       statTile(runs.length, "Total runs"),
       statTile(`$${avgCost.toFixed(3)}`, "Avg cost / run"),
       statTile(`${avgDuration.toFixed(0)}s`, "Avg duration"),
-      statTile(runs.length ? `${Math.round((merged / runs.length) * 100)}%` : "—", "Merged as-is"),
+      statTile(withOutcome.length ? `${Math.round((merged / withOutcome.length) * 100)}%` : "—", "Merged as-is"),
     );
   }
 
@@ -190,7 +197,7 @@
     const el = document.getElementById("chart-merge-rate");
     el.innerHTML = "";
     RISK_ORDER.forEach((level, i) => {
-      const subset = runs.filter(r => r.risk_level === level);
+      const subset = runs.filter(r => r.risk_level === level && r.human_merged_as_is !== null);
       const rate = subset.length ? subset.filter(r => r.human_merged_as_is).length / subset.length : 0;
       el.appendChild(bar(level, `${Math.round(rate * 100)}%`, rate, ORDINAL_COLORS[i]));
     });
@@ -201,9 +208,11 @@
     tbody.innerHTML = "";
     for (const r of runs) {
       const tr = document.createElement("tr");
-      const prCell = r.pr_url ? `<a href="${r.pr_url}" target="_blank">PR</a>` : "—";
+      const prCell = (r.pr_url && r.pr_url.startsWith("https://"))
+        ? `<a href="${escapeHtml(r.pr_url)}" target="_blank">PR</a>`
+        : "—";
       tr.innerHTML = `
-        <td>#${r.issue_number} ${r.issue_title}</td>
+        <td>#${r.issue_number} ${escapeHtml(r.issue_title)}</td>
         <td>${r.bug_type}</td>
         <td>${r.severity}</td>
         <td>${r.risk_level}</td>
@@ -228,6 +237,12 @@
         Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
       },
     });
+    if (!res.ok) {
+      const banner = document.getElementById("config-banner");
+      banner.textContent = `Failed to load data from Supabase (HTTP ${res.status}). Check SUPABASE_URL/SUPABASE_ANON_KEY and the RLS policy.`;
+      banner.style.display = "block";
+      return;
+    }
     const runs = await res.json();
     renderStats(runs);
     renderBugType(runs);

@@ -24,8 +24,10 @@ def derive_pipeline_outcome(ctx: BugContext, crashed: bool) -> str:
     if ctx.pr_url:
         return "fixed_auto_pr"
     if ctx.autonomy_decision == AutonomyDecision.HITL_REQUIRED:
-        return "hitl_rejected"
-    return "hitl_pending"
+        # Covers actual rejection, a 30-min timeout, and "no file changes to commit" alike —
+        # solve.py doesn't expose which of the three happened.
+        return "hitl_no_pr"
+    return "no_pr_opened"
 
 
 def mock_human_outcomes(risk_level: RiskLevel, autonomy_decision: AutonomyDecision) -> dict:
@@ -63,7 +65,14 @@ def build_row(ctx: BugContext, tracker: CostTracker, duration_seconds: float, cr
         "pipeline_outcome": derive_pipeline_outcome(ctx, crashed),
         "pr_url": ctx.pr_url or None,
     }
-    row.update(mock_human_outcomes(ctx.risk_level, ctx.autonomy_decision))
+    if ctx.pr_url:
+        row.update(mock_human_outcomes(ctx.risk_level, ctx.autonomy_decision))
+    else:
+        row.update({
+            "human_rejected": None,
+            "human_merged_as_is": None,
+            "human_added_comment": None,
+        })
     return row
 
 
