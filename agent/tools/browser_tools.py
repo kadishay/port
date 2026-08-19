@@ -15,7 +15,8 @@ def _get_page():
     from playwright.sync_api import sync_playwright
     if not getattr(_local, "page", None):
         _local.pw = sync_playwright().start()
-        _local.browser = _local.pw.chromium.launch(headless=True)
+        headless = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
+        _local.browser = _local.pw.chromium.launch(headless=headless)
         _local.page = _local.browser.new_page()
     return _local.page
 
@@ -65,6 +66,24 @@ def browser_screenshot(filename: str) -> str:
     path = out_dir / filename
     page.screenshot(path=str(path))
     return str(path)
+
+
+def browser_settle(timeout_ms: int = 5000) -> None:
+    """Force-close any open modal (Escape) and wait for in-flight network requests to
+    finish. Used right before the automatic (code-driven) before/after screenshots so
+    they don't capture a stuck-open task modal or a stale pre-fetch of the board —
+    e.g. if 'mark done' hadn't finished persisting before go_back() re-fetched the
+    board data. Not exposed as an LLM tool; called directly around screenshot capture."""
+    page = _get_page()
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:
+        pass
+    page.wait_for_timeout(500)
 
 
 def browser_wait(milliseconds: int = 1000) -> str:

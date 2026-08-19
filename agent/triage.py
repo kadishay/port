@@ -8,7 +8,7 @@ from agent.tools.file_tools import read_file
 from agent.tools.browser_tools import (
     BROWSER_TOOLS, browser_navigate, browser_click, browser_type,
     browser_get_text, browser_screenshot, browser_wait, browser_evaluate,
-    browser_press, browser_go_back, close_browser, playwright_enabled,
+    browser_press, browser_go_back, browser_settle, close_browser, playwright_enabled,
 )
 from agent.cost_tracker import CostTracker
 
@@ -17,6 +17,7 @@ client = anthropic.Anthropic()
 _HAIKU = "claude-haiku-4-5"
 _OPUS = "claude-opus-4-8"
 _OPUS_RETRY_CONFIDENCE_THRESHOLD = 0.70
+_REPRODUCTION_AUTO_CLOSE_THRESHOLD = 0.85
 
 
 def _extract_json(text: str) -> dict:
@@ -81,6 +82,30 @@ def run_triage(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCo
 
     print(f"[triage] #{ctx.issue_number} — reproducing bug", flush=True)
     ctx.reproduction_log = _reproduce(ctx, ctx.reproduction_steps, tracker)
+
+    print(f"[triage] #{ctx.issue_number} — checking if bug reproduced", flush=True)
+    reproduced, repro_confidence, repro_reason = _check_reproduction(ctx, tracker)
+    ctx.reproduction_confidence = repro_confidence
+    ctx.reproduction_reason = repro_reason
+
+    if not reproduced:
+        ctx.unable_to_reproduce = True
+        print(
+            f"[triage] #{ctx.issue_number} — unable to reproduce "
+            f"(confidence={repro_confidence:.2f}): {repro_reason}",
+            flush=True,
+        )
+        gh.post_comment(ctx.issue_number, _unable_to_reproduce_comment(ctx))
+        gh.add_label(ctx.issue_number, "cannot-reproduce")
+        if repro_confidence >= _REPRODUCTION_AUTO_CLOSE_THRESHOLD:
+            gh.close_issue(ctx.issue_number)
+            ctx.issue_closed = True
+            print(
+                f"[triage] #{ctx.issue_number} — auto-closed "
+                f"(confidence ≥ {_REPRODUCTION_AUTO_CLOSE_THRESHOLD})",
+                flush=True,
+            )
+        return ctx
 
     _check_not_a_bug(ctx)
     if ctx.not_a_bug:
@@ -174,9 +199,9 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
             f"browser_press '#password' 'Enter', browser_wait 2000ms. "
         )
 
-    max_tool_calls = 20 if use_browser else 4
+    max_tool_calls = 25 if use_browser else 4
     kanban_hint = (
-        f"\nKANBAN STEPS — call these browser tools IN THIS EXACT ORDER, one per tool call:\n"
+        f"\nKANBAN STEPS — call these tools IN THIS EXACT ORDER, one per tool call:\n"
         f"1) browser_navigate 'http://localhost:4173'\n"
         f"2) browser_evaluate 'localStorage.setItem(\"API_URL\",\"http://localhost:3456\")'\n"
         f"3) browser_navigate 'http://localhost:4173'\n"
@@ -185,18 +210,53 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
         f"6) browser_type '#password' '{vikunja_password}'\n"
         f"7) browser_press '#password' 'Enter'\n"
         f"8) browser_wait 2000\n"
-        f"9) browser_navigate 'http://localhost:4173/projects/3/20'\n"
-        f"10) browser_wait 3000\n"
-        f"11) browser_click '.kanban-card__title-link'\n"
-        f"12) browser_wait 2000\n"
-        f"13) browser_click '.button--mark-done'\n"
-        f"14) browser_wait 2000\n"
-        f"15) browser_go_back\n"
-        f"16) browser_wait 3000\n"
-        f"After step 16, STOP immediately — do NOT call browser_screenshot. "
+        f"9) run_shell: TASK_ID=$(curl -s -X PUT http://localhost:3456/api/v1/projects/3/tasks "
+        f"{auth_header} -H 'Content-Type: application/json' -d '{{\"title\":\"Kanban Repro Task\"}}' "
+        f"| python3 -c \"import sys,json;print(json.load(sys.stdin)['id'])\") && "
+        f"curl -s -X POST http://localhost:3456/api/v1/projects/3/views/20/buckets/13/tasks "
+        f"{auth_header} -H 'Content-Type: application/json' -d \"{{\\\"task_id\\\":$TASK_ID}}\"  "
+        f"(creates a FRESH task and moves it into the To-Do bucket — do NOT reuse an existing "
+        f"card; repeated test runs may have already marked all existing tasks done, so there "
+        f"may be no undone task left to click)\n"
+        f"10) browser_navigate 'http://localhost:4173/projects/3/20'\n"
+        f"11) browser_wait 3000\n"
+        f"12) browser_click 'text=Kanban Repro Task'\n"
+        f"13) browser_wait 2000\n"
+        f"14) browser_click '.button--mark-done'\n"
+        f"15) browser_wait 2000\n"
+        f"16) browser_go_back\n"
+        f"17) browser_wait 3000\n"
+        f"After step 17, STOP immediately — do NOT call browser_screenshot. "
         f"A screenshot will be taken automatically. Summarize what you observed.\n"
         if (use_browser and "kanban" in ctx.issue_title.lower()) else ""
     )
+    color_hint = (
+        f"\nCOLOR STEPS — call these browser tools IN THIS EXACT ORDER, one per tool call:\n"
+        f"1) browser_navigate 'http://localhost:4173'\n"
+        f"2) browser_evaluate 'localStorage.setItem(\"API_URL\",\"http://localhost:3456\")'\n"
+        f"3) browser_navigate 'http://localhost:4173'\n"
+        f"4) browser_wait 1000\n"
+        f"5) browser_type '#username' '{vikunja_username}'\n"
+        f"6) browser_type '#password' '{vikunja_password}'\n"
+        f"7) browser_press '#password' 'Enter'\n"
+        f"8) browser_wait 2000\n"
+        f"9) browser_navigate 'http://localhost:4173/projects/3'\n"
+        f"10) browser_wait 3000\n"
+        f"11) browser_click '.task-link'  (opens the first task)\n"
+        f"12) browser_wait 2000\n"
+        f"13) browser_click 'text=Set Color'  (reveals the color picker field)\n"
+        f"14) browser_wait 1000\n"
+        f"15) browser_type '.picker__input' '#ff0000'  (sets the color — this is a native "
+        f"<input type=\"color\">, so browser_type/fill sets the value directly; do NOT try to "
+        f"click a swatch or circle, there isn't a clickable one in the DOM)\n"
+        f"16) browser_wait 2000  (color picker auto-saves on change, no Save button to click)\n"
+        f"17) browser_go_back\n"
+        f"18) browser_wait 3000\n"
+        f"After step 18, STOP immediately — do NOT call browser_screenshot. "
+        f"A screenshot will be taken automatically. Summarize what you observed.\n"
+        if (use_browser and "color" in ctx.issue_title.lower()) else ""
+    )
+    ui_hint = kanban_hint or color_hint
 
     messages = [{
         "role": "user",
@@ -209,13 +269,13 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
             f"API auth header: {auth_header}\n\n"
             f"BUG TYPE: {'FRONTEND (TypeScript/Vue)' if is_ui_bug else 'BACKEND (Go)'}\n\n"
             "RULES:\n"
-            "- Do NOT try to create new tasks or users — use existing data.\n"
+            "- Do NOT create new tasks or users, UNLESS a numbered script below explicitly tells you to.\n"
             "- macOS date syntax: use $(date -v+1d +%s) for 'tomorrow', NOT date -d.\n"
             + (
                 f"- This is a FRONTEND bug. Search {ctx.repo_path}/frontend/src/ for .ts/.vue files. "
                 f"Do NOT read .go files. "
                 + (f"{login_instruction}Use browser_* tools to reproduce visually. "
-                   f"{kanban_hint}"
+                   f"{ui_hint}"
                    f"Take a final browser_screenshot named 'bug-{ctx.issue_number}-before.png' showing the bug state.\n"
                    if use_browser else
                    f"Run: find {ctx.repo_path}/frontend/src/stores -name '*.ts' | head -10 "
@@ -230,7 +290,7 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
         ),
     }]
     log_parts: list[str] = []
-    max_iterations = 20 if use_browser else 5
+    max_iterations = 25 if use_browser else 5
 
     for iteration in range(max_iterations):
         print(f"[triage] #{ctx.issue_number} — reproduce iteration {iteration + 1}", flush=True)
@@ -266,6 +326,7 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
     # Take the "before fix" screenshot programmatically so the name is always canonical
     # and it always captures the current browser state (kanban board after go_back).
     if use_browser:
+        browser_settle()
         canonical = f"bug-{ctx.issue_number}-before.png"
         path = browser_screenshot(canonical)
         if not path.startswith("Error"):
@@ -274,6 +335,167 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
 
     close_browser()
     return "\n".join(log_parts)
+
+
+_REPRODUCTION_TOOL = {
+    "name": "report_reproduction",
+    "description": "Report whether there is real evidence the bug described in the issue exists.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reproduced": {
+                "type": "boolean",
+                "description": (
+                    "true if you either (a) directly observed the 'Actual behaviour' happening, or "
+                    "(b) found a SPECIFIC, concrete logic flaw — an identifiable wrong condition, "
+                    "operator, or value on a particular line — that would cause it. Vague suspicion "
+                    "('might not be wired up', 'doesn't explicitly show X', 'unclear if Y persists') "
+                    "is NOT evidence; it's speculation from an incomplete search, not a finding. "
+                    "false if EITHER: you found the exact relevant code path and it correctly matches "
+                    "'Expected behaviour' with no identifiable flaw, OR the feature clearly has a "
+                    "complete, intentional-looking implementation (the UI component, the data field, "
+                    "and the rendering logic all exist and connect to each other) and you cannot point "
+                    "to one specific broken line — a complete implementation with no identifiable defect "
+                    "is evidence the feature works, you don't need airtight proof of correctness."
+                ),
+            },
+            "confidence": {
+                "type": "number",
+                "description": (
+                    "0.0–1.0. For reproduced=false, this is confidence that the code is CORRECT — "
+                    "not confidence that the search was thorough."
+                ),
+            },
+            "reason": {"type": "string", "description": "One or two sentences: what was observed and why"},
+        },
+        "required": ["reproduced", "confidence", "reason"],
+    },
+}
+
+
+def _check_reproduction(ctx: BugContext, tracker: CostTracker) -> tuple[bool, float, str]:
+    """Ask Haiku whether the bug actually exists. Gets a few extra tool calls to dig further
+    if the reproduction log alone is inconclusive, instead of judging blind on whatever the
+    (budget-limited) reproduce step happened to find."""
+    messages = [{
+        "role": "user",
+        "content": (
+            f"Issue: {ctx.issue_title}\n{ctx.issue_body}\n\n"
+            f"Reproduction attempt log so far:\n{ctx.reproduction_log[:8000]}\n\n"
+            f"Repo: {ctx.repo_path}\n\n"
+            "Is there real evidence this bug exists? A specific, concrete logic flaw found by reading "
+            "code counts as evidence — you do NOT need to have triggered it live. If the log above is "
+            "inconclusive, use up to 5 more tool calls (read_file/run_shell) before deciding. Search "
+            "broadly first — e.g. `grep -rl '<relevant field/keyword>' <repo>/frontend/src/components` "
+            "— there are often several similarly-named components (list view, detail view, card view, "
+            "readonly view); check more than one before concluding you can't find the relevant code. "
+            "Only report reproduced=false once you've actually found and read the specific code path "
+            "the reproduction steps exercise, not an adjacent one. Call report_reproduction with your "
+            "verdict when ready."
+        ),
+    }]
+
+    for _ in range(6):
+        response = client.messages.create(
+            model=_HAIKU,
+            max_tokens=2048,
+            tools=[*_TRIAGE_TOOLS, _REPRODUCTION_TOOL],
+            messages=messages,
+        )
+        tracker.record(response.model, response.usage)
+
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "report_reproduction":
+                d = block.input
+                return bool(d.get("reproduced", True)), float(d.get("confidence", 0.5)), d.get("reason", "")
+
+        if response.stop_reason == "end_turn":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                if block.name == "read_file":
+                    try:
+                        result = read_file(block.input["path"])
+                    except (FileNotFoundError, IsADirectoryError, OSError) as e:
+                        result = f"Error: {e}"
+                elif block.name == "run_shell":
+                    stdout, stderr, _ = run_shell(block.input["cmd"], cwd=ctx.repo_path)
+                    result = (stdout + stderr)[:4000]
+                else:
+                    result = f"Unknown tool: {block.name}"
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result[:8000],
+                })
+
+        if not tool_results:
+            break
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    return _force_reproduction_verdict(ctx, tracker, messages)
+
+
+def _force_reproduction_verdict(
+    ctx: BugContext, tracker: CostTracker, messages: list,
+) -> tuple[bool, float, str]:
+    """Forced verdict when the loop ran out of iterations — reuses the full investigation
+    transcript (everything read so far) as context, not just the issue text, so this isn't
+    a guess made from nothing."""
+    closing = (
+        "You've run out of tool calls. Based on everything you've read above (not on how the "
+        "issue *sounds*), is there real evidence this bug exists? Call report_reproduction with "
+        "your best-effort verdict."
+    )
+    # The last message here is always role="user" (either the initial prompt, if the model
+    # hit end_turn immediately, or the final tool_results) — the API requires strict
+    # user/assistant alternation, so the closing instruction must be merged into it rather
+    # than appended as a new message.
+    last = messages[-1]
+    if last["role"] == "user":
+        content = last["content"]
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        messages = messages[:-1] + [{"role": "user", "content": [*content, {"type": "text", "text": closing}]}]
+    else:
+        messages = messages + [{"role": "user", "content": closing}]
+    response = client.messages.create(
+        model=_HAIKU,
+        max_tokens=512,
+        tools=[_REPRODUCTION_TOOL],
+        tool_choice={"type": "tool", "name": "report_reproduction"},
+        messages=messages,
+    )
+    tracker.record(response.model, response.usage)
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "report_reproduction":
+            d = block.input
+            return bool(d.get("reproduced", True)), float(d.get("confidence", 0.5)), d.get("reason", "")
+    # Fail safe: if the model returned no verdict, assume reproduced so the pipeline
+    # doesn't silently skip a real bug.
+    return True, 0.0, "reproduction-check returned no verdict"
+
+
+def _unable_to_reproduce_comment(ctx: BugContext) -> str:
+    auto_closed = ctx.reproduction_confidence >= _REPRODUCTION_AUTO_CLOSE_THRESHOLD
+    closed_note = (
+        "🔒 **Closing automatically** — confidence is high enough that this doesn't need human review. "
+        "Reopen if you can provide more detail or a clearer repro."
+        if auto_closed else
+        "⚠️ **Leaving this open** — confidence isn't high enough to auto-close. A human should take a look."
+    )
+    return (
+        f"## 🔍 Unable to Reproduce — #{ctx.issue_number}\n\n"
+        f"I followed the reproduction steps but did not observe the described bug.\n\n"
+        f"**Confidence:** {ctx.reproduction_confidence:.0%}\n"
+        f"**What I observed:** {ctx.reproduction_reason}\n\n"
+        f"{closed_note}\n\n"
+        f"*Triage powered by Claude Haiku 4.5*"
+    )
 
 
 def _check_not_a_bug(ctx: BugContext) -> None:

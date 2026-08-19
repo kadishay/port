@@ -56,11 +56,29 @@ _FE_ISSUE = {
 }
 
 
+_UNREPRODUCIBLE_ISSUE = {
+    "number": 9903,
+    "title": "Bug: Set color is not working",
+    "body": (
+        "Setting a task color is not working.\n\n"
+        "Steps to reproduce:\n"
+        "1. Open a task.\n"
+        "2. Click set color.\n"
+        "3. Click on a color selector circle.\n"
+        "4. Select red color.\n"
+        "5. Go back to project.\n\n"
+        "Expected behaviour: red dot will appear next to the task.\n"
+        "Actual behaviour: no dot appears next to the task."
+    ),
+}
+
+
 def _mock_gh(issue_data: dict) -> MagicMock:
     gh = MagicMock()
     gh.get_issue.return_value = issue_data
     gh.post_comment.return_value = None
     gh.add_label.return_value = None
+    gh.close_issue.return_value = None
     gh.create_pr.return_value = {"html_url": "https://github.com/test/vikunja/pull/999"}
     gh.get_commit_author_login.return_value = None
     gh.get_file_top_authors.return_value = []
@@ -213,3 +231,45 @@ def test_frontend_bug_kanban_done_bucket(mock_push, mock_wait, clean_vikunja, no
     print(f"[FE test] root_cause: {ctx.root_cause}")
     print(f"[FE test] buggy_pattern: {ctx.buggy_pattern}")
     print(f"[FE test] diff:\n{diff}")
+
+
+def test_cannot_reproduce_color_bug(no_playwright):
+    """
+    Demo bug 3: "unable to reproduce". Unlike the other two demo bugs, this
+    issue describes behaviour that does NOT actually exist in this codebase —
+    setting a task color works correctly. The agent must:
+    - Follow the reproduction steps (source-code inspection, no browser)
+    - Correctly conclude it could NOT reproduce the described bug
+    - Stop before root-cause analysis and solve entirely (no fabricated fix
+      for something that isn't broken)
+
+    Confidence-gated auto-close (>=0.85, see agent/triage.py) is intentionally
+    NOT asserted here since it depends on real model confidence, which varies
+    run to run — see tests/test_triage.py for a deterministic mocked test of
+    that close-vs-leave-open branching. What matters in this integration test
+    is the core detection capability against the real Vikunja codebase.
+    """
+    tracker = CostTracker()
+    gh = _mock_gh(_UNREPRODUCIBLE_ISSUE)
+    ctx = BugContext(
+        issue_number=9903,
+        issue_title=_UNREPRODUCIBLE_ISSUE["title"],
+        issue_body=_UNREPRODUCIBLE_ISSUE["body"],
+        repo_path=VIKUNJA_REPO,
+    )
+
+    ctx = run_triage(ctx, gh, tracker)
+
+    assert ctx.unable_to_reproduce is True, (
+        f"Expected unable_to_reproduce=True, got root_cause={ctx.root_cause!r} "
+        f"reproduction_reason={ctx.reproduction_reason!r}"
+    )
+    assert ctx.reproduction_confidence >= 0.5, f"Confidence too low to be meaningful: {ctx.reproduction_confidence}"
+    assert ctx.root_cause == "", "Should never have reached root-cause analysis"
+    gh.add_label.assert_called_once_with(9903, "cannot-reproduce")
+    gh.post_comment.assert_called_once()
+
+    print(f"\n[unreproducible test] cost: {tracker.summary()}")
+    print(f"[unreproducible test] confidence: {ctx.reproduction_confidence}")
+    print(f"[unreproducible test] reason: {ctx.reproduction_reason}")
+    print(f"[unreproducible test] issue_closed: {ctx.issue_closed}")

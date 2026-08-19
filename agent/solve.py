@@ -8,7 +8,7 @@ from agent.tools.file_tools import read_file, write_file
 from agent.tools.browser_tools import (
     BROWSER_TOOLS, browser_navigate, browser_click, browser_type,
     browser_get_text, browser_screenshot, browser_wait, browser_evaluate,
-    browser_press, browser_go_back, close_browser, playwright_enabled,
+    browser_press, browser_go_back, browser_settle, close_browser, playwright_enabled,
 )
 from agent.autonomy import evaluate_autonomy
 from agent.hitl import wait_for_approval, HITLTimeout
@@ -280,6 +280,8 @@ def _verify_fix_frontend(ctx: BugContext, tracker: CostTracker) -> None:
     vikunja_username = os.environ.get("VIKUNJA_USERNAME", "")
     vikunja_password = os.environ.get("VIKUNJA_PASSWORD", "")
     is_kanban = "kanban" in (ctx.issue_title or "").lower()
+    api_token = os.environ.get("VIKUNJA_API_TOKEN", "")
+    auth_header = f"-H 'Authorization: Bearer {api_token}'" if api_token else ""
     kanban_verify = (
         "\nKANBAN VERIFY STEPS (follow exactly):\n"
         "1. browser_navigate 'http://localhost:4173'\n"
@@ -290,18 +292,52 @@ def _verify_fix_frontend(ctx: BugContext, tracker: CostTracker) -> None:
         f"6. browser_type '#password' '{vikunja_password}'\n"
         "7. browser_press '#password' 'Enter'\n"
         "8. browser_wait 2000ms\n"
-        "9. browser_navigate 'http://localhost:4173/projects/3/20'\n"
-        "10. browser_wait 3000ms for Kanban to load\n"
-        "11. browser_click '.kanban-card__title-link'  (click first task in To-Do)\n"
-        "12. browser_wait 2000ms\n"
-        "13. browser_click '.button--mark-done'\n"
-        "14. browser_wait 2000ms\n"
-        "15. browser_go_back  (IMPORTANT: use go_back, not navigate, to keep Kanban state in memory)\n"
-        "16. browser_wait 3000ms\n"
-        "After step 16, STOP immediately — do NOT call browser_screenshot. "
+        f"9. run_shell: TASK_ID=$(curl -s -X PUT http://localhost:3456/api/v1/projects/3/tasks "
+        f"{auth_header} -H 'Content-Type: application/json' -d '{{\"title\":\"Kanban Verify Task\"}}' "
+        f"| python3 -c \"import sys,json;print(json.load(sys.stdin)['id'])\") && "
+        f"curl -s -X POST http://localhost:3456/api/v1/projects/3/views/20/buckets/13/tasks "
+        f"{auth_header} -H 'Content-Type: application/json' -d \"{{\\\"task_id\\\":$TASK_ID}}\"  "
+        f"(creates a FRESH task and moves it into the To-Do bucket — do NOT reuse an existing "
+        f"card; prior runs may have already marked everything done)\n"
+        "10. browser_navigate 'http://localhost:4173/projects/3/20'\n"
+        "11. browser_wait 3000ms for Kanban to load\n"
+        "12. browser_click 'text=Kanban Verify Task'\n"
+        "13. browser_wait 2000ms\n"
+        "14. browser_click '.button--mark-done'\n"
+        "15. browser_wait 2000ms\n"
+        "16. browser_go_back  (IMPORTANT: use go_back, not navigate, to keep Kanban state in memory)\n"
+        "17. browser_wait 3000ms\n"
+        "After step 17, STOP immediately — do NOT call browser_screenshot. "
         "A screenshot will be taken automatically.\n"
         if is_kanban else ""
     )
+    is_color = "color" in (ctx.issue_title or "").lower()
+    color_verify = (
+        "\nCOLOR VERIFY STEPS (follow exactly):\n"
+        "1. browser_navigate 'http://localhost:4173'\n"
+        "2. browser_evaluate 'localStorage.setItem(\"API_URL\", \"http://localhost:3456\")'\n"
+        "3. browser_navigate 'http://localhost:4173'\n"
+        "4. browser_wait 1000ms\n"
+        f"5. browser_type '#username' '{vikunja_username}'\n"
+        f"6. browser_type '#password' '{vikunja_password}'\n"
+        "7. browser_press '#password' 'Enter'\n"
+        "8. browser_wait 2000ms\n"
+        "9. browser_navigate 'http://localhost:4173/projects/3'\n"
+        "10. browser_wait 3000ms\n"
+        "11. browser_click '.task-link'  (opens the first task)\n"
+        "12. browser_wait 2000ms\n"
+        "13. browser_click 'text=Set Color'  (reveals the color picker field)\n"
+        "14. browser_wait 1000ms\n"
+        "15. browser_type '.picker__input' '#ff0000'  (native <input type=\"color\">, so "
+        "browser_type/fill sets the value directly — do NOT try to click a swatch or circle)\n"
+        "16. browser_wait 2000ms  (color picker auto-saves on change)\n"
+        "17. browser_go_back\n"
+        "18. browser_wait 3000ms\n"
+        "After step 18, STOP immediately — do NOT call browser_screenshot. "
+        "A screenshot will be taken automatically.\n"
+        if is_color else ""
+    )
+    ui_verify = kanban_verify or color_verify
 
     messages = [{
         "role": "user",
@@ -311,17 +347,17 @@ def _verify_fix_frontend(ctx: BugContext, tracker: CostTracker) -> None:
             f"Root cause that was fixed: {ctx.root_cause}\n\n"
             f"Original reproduction steps:\n{ctx.reproduction_steps}\n\n"
             f"Vikunja frontend: http://localhost:4173\n"
-            f"{kanban_verify}"
+            f"{ui_verify}"
             "Re-run the steps and confirm the bug is gone. "
             f"Take a screenshot named 'bug-{ctx.issue_number}-after.png' showing the fixed state."
         ),
     }]
 
-    for _ in range(12):
+    for _ in range(25):
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=4096,
-            tools=BROWSER_TOOLS,
+            tools=BROWSER_TOOLS + _VERIFY_TOOLS,
             messages=messages,
         )
 
@@ -332,7 +368,10 @@ def _verify_fix_frontend(ctx: BugContext, tracker: CostTracker) -> None:
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
-                result = _execute_browser_tool(block.name, block.input)
+                if block.name in ("run_shell", "read_file"):
+                    result = _execute_tool(block.name, block.input, ctx.repo_path)
+                else:
+                    result = _execute_browser_tool(block.name, block.input)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -343,6 +382,7 @@ def _verify_fix_frontend(ctx: BugContext, tracker: CostTracker) -> None:
         messages.append({"role": "user", "content": tool_results})
 
     # Take the after-screenshot programmatically with a canonical name
+    browser_settle()
     canonical = f"bug-{ctx.issue_number}-after.png"
     path = browser_screenshot(canonical)
     if not path.startswith("Error"):

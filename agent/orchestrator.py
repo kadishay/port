@@ -65,6 +65,14 @@ def run_pipeline(issue_number: int) -> BugContext | None:
             _notify_thread(ctx, f"🚫 Issue #{issue_number} closed as not a bug: {ctx.not_a_bug_reason}")
             return ctx
 
+        if ctx.unable_to_reproduce:
+            status = "closed automatically" if ctx.issue_closed else "left open for human review"
+            _notify_thread(ctx, (
+                f"🔍 Issue #{issue_number} could not be reproduced "
+                f"(confidence {ctx.reproduction_confidence:.0%}) — {status}."
+            ))
+            return ctx
+
         people_tags: list[str] = []
         if ctx.blame_author:
             people_tags.append(f"@{ctx.blame_author} (introduced)")

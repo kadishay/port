@@ -38,6 +38,10 @@ class BugContext:
     autonomy_reasons: list[str] = field(default_factory=list)
     not_a_bug: bool = False
     not_a_bug_reason: str = ""
+    unable_to_reproduce: bool = False
+    reproduction_confidence: float = 0.0
+    reproduction_reason: str = ""
+    issue_closed: bool = False
     reproduction_steps: str = ""
     screenshot_before: str = ""
     screenshot_after: str = ""

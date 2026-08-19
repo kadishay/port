@@ -43,6 +43,14 @@ class GitHubClient:
         )
         r.raise_for_status()
 
+    def close_issue(self, issue_number: int) -> None:
+        r = requests.patch(
+            self._url(f"issues/{issue_number}"),
+            headers=self._headers,
+            json={"state": "closed"},
+        )
+        r.raise_for_status()
+
     def get_open_pr_for_branch(self, branch: str) -> dict | None:
         owner = self._repo.split("/")[0]
         r = requests.get(
