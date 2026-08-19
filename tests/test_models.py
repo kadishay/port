@@ -19,4 +19,3 @@ def test_severity_enum_values():
 def test_autonomy_decision_enum_values():
     assert AutonomyDecision.AUTO_MERGE == "AUTO_MERGE"
     assert AutonomyDecision.HITL_REQUIRED == "HITL_REQUIRED"
-    assert AutonomyDecision.ESCALATE_ONLY == "ESCALATE_ONLY"

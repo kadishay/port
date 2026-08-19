@@ -41,8 +41,8 @@ Orchestrator (Python)
        ├─ Autonomy Check (rules: severity, files, lines, confidence, keywords)
        └─ Solve Agent (Opus fix proposal → auto-merge OR HITL)
             ├─ AUTO_MERGE: apply patch → tests → PR (no human needed)
-            ├─ HITL_REQUIRED: post diff → wait for /approve or /reject
-            └─ ESCALATE_ONLY: auth/migration changes → human review only
+            └─ HITL_REQUIRED: post diff → wait for /approve or /reject
+                 (auth/migration/security-sensitive diffs always land here — never auto-merged, but still get a suggested fix)
 ```
 
 **Models used:**
@@ -115,10 +115,12 @@ The agent auto-merges if ALL criteria are met; otherwise requires HITL.
 | Model confidence | ≥ 0.85 | Opus outputs structured confidence score |
 | Fix type | Pure correction of existing logic | No new behavior, no new dependencies |
 
-**Escalate to human only (no fix attempt):**
+**Always HITL, never auto-merged (fix is still suggested):**
 - Database schema changes (migration files)
 - Auth, permissions, session token handling
 - API contract changes (route signatures, response shapes)
+
+These are detected via a keyword match on the diff plus a Haiku semantic pass (which can flag e.g. password-verification code even when no keyword matches literally). Either signal forces `HITL_REQUIRED`, overriding whatever the size/confidence rules would otherwise say — a human must approve before the fix merges, but the agent still writes and proposes it. There is no longer an "escalate with no fix attempt" path.
 
 Both demo bugs meet auto-merge criteria.
 

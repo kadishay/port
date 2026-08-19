@@ -143,11 +143,14 @@ def test_model_cannot_lower_risk_below_rules(mock_model_risk):
     assert risk == RiskLevel.HIGH
 
 
-def test_escalate_for_auth_changes():
+def test_auth_changes_require_hitl_not_auto_merge():
+    # ESCALATE risk no longer skips the fix entirely — it's still suggested via HITL,
+    # just never auto-merged, even though this diff would otherwise qualify as LOW risk.
     diff_with_auth = SMALL_DIFF + "\n+// auth token handling\n"
     decision, reasons = evaluate_autonomy(_ctx(), diff_with_auth)
-    assert decision == AutonomyDecision.ESCALATE_ONLY
+    assert decision == AutonomyDecision.HITL_REQUIRED
     assert any("auth" in r for r in reasons)
+    assert any("ESCALATE risk" in r for r in reasons)
 
 
 def test_risk_stored_on_ctx():

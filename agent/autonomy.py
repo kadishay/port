@@ -108,7 +108,11 @@ def evaluate_autonomy(ctx: BugContext, diff: str) -> tuple[AutonomyDecision, lis
     reasons: list[str] = list(risk_reasons)
 
     if risk == RiskLevel.ESCALATE:
-        return AutonomyDecision.ESCALATE_ONLY, reasons
+        reasons.append(
+            "ESCALATE risk (auth/security-sensitive) — fix still suggested, "
+            "human approval required, never auto-merged"
+        )
+        return AutonomyDecision.HITL_REQUIRED, reasons
 
     if ctx.severity == Severity.CRITICAL:
         reasons.append("CRITICAL severity — HITL always required regardless of risk")

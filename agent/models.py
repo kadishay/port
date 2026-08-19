@@ -19,7 +19,6 @@ class RiskLevel(str, Enum):
 class AutonomyDecision(str, Enum):
     AUTO_MERGE = "AUTO_MERGE"
     HITL_REQUIRED = "HITL_REQUIRED"
-    ESCALATE_ONLY = "ESCALATE_ONLY"
 
 
 @dataclass
@@ -42,6 +41,8 @@ class BugContext:
     reproduction_steps: str = ""
     screenshot_before: str = ""
     screenshot_after: str = ""
+    fix_verified: bool = False
+    verification_log: str = ""
     affected_files: list[str] = field(default_factory=list)
     buggy_pattern: str = ""
     blame_author: str = ""

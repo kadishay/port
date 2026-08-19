@@ -12,8 +12,46 @@ from agent.tools.browser_tools import (
 )
 from agent.autonomy import evaluate_autonomy
 from agent.hitl import wait_for_approval, HITLTimeout
+from agent.triage import _is_frontend_bug
 
 client = anthropic.Anthropic()
+
+_VERIFY_TOOLS = [
+    {
+        "name": "run_shell",
+        "description": "Run a shell command (curl against the Vikunja API, git, etc). Read-only — do not modify files here.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string"},
+                "timeout": {"type": "integer", "default": 60},
+            },
+            "required": ["cmd"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read a source file from the Vikunja repo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+]
+
+_REPORT_VERIFICATION_TOOL = {
+    "name": "report_verification",
+    "description": "Report whether re-running the reproduction steps shows the bug is fixed.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "fixed": {"type": "boolean", "description": "true if the bug no longer reproduces"},
+            "evidence": {"type": "string", "description": "What you observed — e.g. curl status/body before vs after"},
+        },
+        "required": ["fixed", "evidence"],
+    },
+}
 
 _SOLVE_TOOLS = [
     {
@@ -68,10 +106,6 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
     ctx.autonomy_decision = decision
     ctx.autonomy_reasons = reasons
 
-    if decision == AutonomyDecision.ESCALATE_ONLY:
-        gh.post_comment(ctx.issue_number, _escalate_comment(ctx))
-        return ctx
-
     # Commit fix now — before any HITL wait — so external git ops can't wipe uncommitted changes
     safe_title = ctx.issue_title[:50].replace("'", "")
     _, commit_out, rc = run_shell(
@@ -108,6 +142,110 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
 
 
 def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
+    if _is_frontend_bug(ctx.issue_title):
+        _verify_fix_frontend(ctx, tracker)
+    else:
+        _verify_fix_backend(ctx, tracker)
+
+
+def _verify_fix_backend(ctx: BugContext, tracker: CostTracker) -> None:
+    """Re-run the reproduction curl commands against the live API and confirm the bug is gone."""
+    if not ctx.reproduction_steps:
+        return
+
+    api_token = os.environ.get("VIKUNJA_API_TOKEN", "")
+    api_base = os.environ.get("VIKUNJA_API_BASE", "http://localhost:3456")
+    auth_header = f"-H 'Authorization: Bearer {api_token}'" if api_token else ""
+
+    messages = [{
+        "role": "user",
+        "content": (
+            f"This bug has just been fixed in the code. Re-run the original reproduction steps "
+            f"against the live API to confirm the bug is actually gone.\n\n"
+            f"Issue: {ctx.issue_title}\n"
+            f"Root cause that was fixed: {ctx.root_cause}\n\n"
+            f"Original reproduction steps:\n{ctx.reproduction_steps}\n\n"
+            f"Vikunja API base: {api_base}\n"
+            f"API auth header: {auth_header}\n\n"
+            "Use run_shell (curl) to re-run the same requests. Compare the result against the "
+            "'Actual result' described in the issue — if that behaviour no longer happens, the fix works.\n"
+            "At most 5 tool calls, then call report_verification with your verdict."
+        ),
+    }]
+
+    for _ in range(5):
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=2048,
+            tools=[*_VERIFY_TOOLS, _REPORT_VERIFICATION_TOOL],
+            messages=messages,
+        )
+        tracker.record(response.model, response.usage)
+
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "report_verification":
+                d = block.input
+                ctx.fix_verified = bool(d.get("fixed", False))
+                ctx.verification_log = d.get("evidence", "")
+                print(
+                    f"[solve] #{ctx.issue_number} — verify via curl: "
+                    f"{'PASS' if ctx.fix_verified else 'FAIL'} — {ctx.verification_log[:200]}",
+                    flush=True,
+                )
+                return
+
+        if response.stop_reason == "end_turn":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                result = _execute_tool(block.name, block.input, ctx.repo_path)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    # Model never called report_verification (e.g. kept calling tools) — force a verdict.
+    _force_verification_verdict(ctx, tracker)
+
+
+def _force_verification_verdict(ctx: BugContext, tracker: CostTracker) -> None:
+    response = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=512,
+        tools=[_REPORT_VERIFICATION_TOOL],
+        tool_choice={"type": "tool", "name": "report_verification"},
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Issue: {ctx.issue_title}\nRoot cause fixed: {ctx.root_cause}\n\n"
+                f"You ran out of tool calls while re-verifying this fix. Based on what you saw so far, "
+                "call report_verification with your best-effort verdict."
+            ),
+        }],
+    )
+    tracker.record(response.model, response.usage)
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "report_verification":
+            d = block.input
+            ctx.fix_verified = bool(d.get("fixed", False))
+            ctx.verification_log = d.get("evidence", "inconclusive — ran out of tool calls")
+            print(
+                f"[solve] #{ctx.issue_number} — verify via curl (forced): "
+                f"{'PASS' if ctx.fix_verified else 'FAIL'} — {ctx.verification_log[:200]}",
+                flush=True,
+            )
+            return
+    ctx.fix_verified = False
+    ctx.verification_log = "verification inconclusive — model returned no verdict"
+
+
+def _verify_fix_frontend(ctx: BugContext, tracker: CostTracker) -> None:
     """Re-run the bug reproduction steps with browser tools and take an after-screenshot."""
     if not playwright_enabled() or not ctx.screenshot_before or not ctx.reproduction_steps:
         return
@@ -324,15 +462,6 @@ def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
     )
 
 
-def _escalate_comment(ctx: BugContext) -> str:
-    return (
-        f"## ⚠️ Escalated to human — #{ctx.issue_number}\n\n"
-        f"**Root cause:** {ctx.root_cause}\n\n"
-        "This change touches auth, migrations, or security-sensitive code. "
-        "Automatic fix skipped. Please review and fix manually."
-    )
-
-
 def _pr_body(ctx: BugContext, diff: str) -> str:
     auto = ctx.autonomy_decision == AutonomyDecision.AUTO_MERGE
     risk_line = f"**Risk:** {ctx.risk_level.value} ({'; '.join(ctx.risk_reasons)})\n\n" if ctx.risk_level else ""
@@ -343,14 +472,25 @@ def _pr_body(ctx: BugContext, diff: str) -> str:
         screenshots += f"**After fix:** `{ctx.screenshot_after}`\n"
     if screenshots:
         screenshots = f"\n### Screenshots\n{screenshots}\n"
+
+    verification = ""
+    verified_by = "Not independently verified"
+    if ctx.screenshot_after:
+        verified_by = "Verified by Playwright"
+    elif ctx.verification_log:
+        status = "✅ Verified" if ctx.fix_verified else "⚠️ Verification inconclusive"
+        verified_by = "Verified via curl"
+        verification = f"\n### Verification (curl)\n**{status}**\n```\n{ctx.verification_log[:1500]}\n```\n"
+
     return (
         f"Fixes #{ctx.issue_number}\n\n"
         f"**Severity:** {ctx.severity.value} | **Confidence:** {ctx.confidence:.0%}\n\n"
         f"{risk_line}"
         f"**Root cause:** {ctx.root_cause}\n\n"
         f"{screenshots}"
+        f"{verification}"
         f"**Merge decision:** {'Automatic (LOW risk + criteria met)' if auto else 'Human approved via GitHub'}\n\n"
-        "*Fix proposed by Claude Haiku 4.5 / Verified by Playwright*"
+        f"*Fix proposed by Claude Haiku 4.5 / {verified_by}*"
     )
 
 
