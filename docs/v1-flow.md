@@ -16,6 +16,7 @@ Open items:
 2. b. DONE — BE verify now reports a confidence score too (`ctx.verification_confidence`), same 0.70 Opus-retry threshold as root cause. FE verify stays screenshot-only (no model confidence to gate on).
 3. seems like the agent have a big hint on how to solve the kanban bug: KANBAN VERIFY STEPS (follow exactly)
 4. DONE — see "2b². Check Reproduction Success" below + Demo Bug 3. Note the "Known limitation" callout in that section — this one isn't as reliable as the others (~2/3 in live testing), it's a genuinely hard problem for a cheap model, not fully solved.
+5. NEXT STEP — no cross-bug memory today: every run rediscovers the codebase from scratch via live grep/read_file, so solving bug #1 doesn't make bug #2 any faster or better. To make it learn, after each resolved bug append a `{file, root_cause, fix_pattern}` record to a shared store and feed the most similar past records as few-shot context into future root-cause/fix prompts.
 -->
 
 ## Entry Points
@@ -316,7 +317,7 @@ diff = git_diff(ctx.repo_path)   # git diff of all unstaged changes
 ctx.proposed_diff = diff
 ```
 
-### 4d. Evaluate Risk (no model — pure Python)
+### 4d. Evaluate Risk (rules + one Haiku semantic check)
 
 Two independent evaluations happen:
 
@@ -332,8 +333,8 @@ Two independent evaluations happen:
 `ctx.risk_level` and `ctx.risk_reasons` are written back to the context.
 
 **Risk can escalate two different ways** (`agent/autonomy.py`):
-1. **Rule-based keyword match** (`_rule_risk`) — the diff literally contains one of `"auth token"`, `"auth middleware"`, `"session token"`, `"migration"`, `"schema alter"`. Checked first, deterministic.
-2. **Haiku's semantic judgment** (`_model_risk`) — a second Haiku call is explicitly prompted *"Does the function/variable name suggest it handles auth, permissions, or data integrity?"* and can independently return `"ESCALATE"` even when no keyword matches literally. Model risk can only ever *raise* the rule-based floor, never lower it (`evaluate_risk`).
+1. **Rule-based keyword match** (`_rule_risk`) — pure Python, no model call. The diff literally contains one of `"auth token"`, `"auth middleware"`, `"session token"`, `"migration"`, `"schema alter"`. Checked first, deterministic.
+2. **Haiku's semantic judgment** (`_model_risk`) — a real model call: a Haiku prompt explicitly asks *"Does the function/variable name suggest it handles auth, permissions, or data integrity?"* and can independently return `"ESCALATE"` even when no keyword matches literally. Model risk can only ever *raise* the rule-based floor, never lower it (`evaluate_risk`).
 
 Example: issue #28 (`CheckUserPassword` / `bcrypt.CompareHashAndPassword` in `pkg/user/user.go`) hit path 2 — none of the literal keywords appear in that diff, but Haiku recognized the function as password-verification logic and returned `ESCALATE` on its own.
 
