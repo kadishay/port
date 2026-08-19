@@ -120,8 +120,8 @@ def evaluate_autonomy(ctx: BugContext, diff: str) -> tuple[AutonomyDecision, lis
 
     # Risk is the sole driver of the merge decision
     if risk == RiskLevel.LOW:
-        reasons.append("LOW risk — auto-merge")
-        return AutonomyDecision.AUTO_MERGE, reasons
+        reasons.append("LOW risk — auto PR")
+        return AutonomyDecision.AUTO_PR, reasons
 
     reasons.append(f"{risk} risk — HITL required")
     return AutonomyDecision.HITL_REQUIRED, reasons

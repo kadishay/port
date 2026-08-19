@@ -17,7 +17,7 @@ class RiskLevel(str, Enum):
 
 
 class AutonomyDecision(str, Enum):
-    AUTO_MERGE = "AUTO_MERGE"
+    AUTO_PR = "AUTO_PR"
     HITL_REQUIRED = "HITL_REQUIRED"
 
 

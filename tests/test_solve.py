@@ -22,11 +22,11 @@ def _end_turn(text: str):
     return r
 
 
-@patch("agent.solve.evaluate_autonomy", return_value=(AutonomyDecision.AUTO_MERGE, ["all criteria met"]))
+@patch("agent.solve.evaluate_autonomy", return_value=(AutonomyDecision.AUTO_PR, ["all criteria met"]))
 @patch("agent.solve.git_diff", return_value="diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n")
 @patch("agent.solve.run_shell", return_value=("ok", "", 0))
 @patch("agent.solve.client")
-def test_auto_merge_creates_pr(mock_client, mock_shell, mock_diff, mock_autonomy):
+def test_auto_pr_creates_pr(mock_client, mock_shell, mock_diff, mock_autonomy):
     from agent.solve import run_solve
     mock_client.messages.create.return_value = _end_turn(
         "Apply fix: change time.Hour*38 to time.Hour*14 in task_overdue_reminder.go"
@@ -34,7 +34,7 @@ def test_auto_merge_creates_pr(mock_client, mock_shell, mock_diff, mock_autonomy
     mock_gh = MagicMock()
     ctx = _ctx()
     result = run_solve(ctx, mock_gh, CostTracker())
-    assert result.autonomy_decision == AutonomyDecision.AUTO_MERGE
+    assert result.autonomy_decision == AutonomyDecision.AUTO_PR
     mock_gh.create_pr.assert_called_once()
 
 

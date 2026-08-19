@@ -90,7 +90,7 @@ def _diff_for_branch(branch: str) -> str:
 
 
 @patch("agent.solve.wait_for_approval", side_effect=AssertionError(
-    "HITL triggered — expected AUTO_MERGE for the backend demo bug"
+    "HITL triggered — expected AUTO_PR for the backend demo bug"
 ))
 @patch("agent.solve._push_and_open_pr", side_effect=lambda ctx, gh: ctx)
 def test_backend_bug_overdue_reminder(mock_push, mock_wait, clean_vikunja, no_playwright):
@@ -101,7 +101,7 @@ def test_backend_bug_overdue_reminder(mock_push, mock_wait, clean_vikunja, no_pl
     - Classify as backend / HIGH severity
     - Identify task_overdue_reminder.go as the affected file
     - Fix done = true → done = false (the exact one-character boolean flip)
-    - Qualify for AUTO_MERGE (single-file, single-line, HIGH severity)
+    - Qualify for AUTO_PR (single-file, single-line, HIGH severity)
     """
 
     tracker = CostTracker()
@@ -131,8 +131,8 @@ def test_backend_bug_overdue_reminder(mock_push, mock_wait, clean_vikunja, no_pl
     ctx = run_solve(ctx, gh, tracker)
 
     # --- Solve assertions ---
-    assert ctx.autonomy_decision == AutonomyDecision.AUTO_MERGE, (
-        f"Expected AUTO_MERGE, got {ctx.autonomy_decision}. Reasons: {ctx.autonomy_reasons}"
+    assert ctx.autonomy_decision == AutonomyDecision.AUTO_PR, (
+        f"Expected AUTO_PR, got {ctx.autonomy_decision}. Reasons: {ctx.autonomy_reasons}"
     )
 
     diff = _diff_for_branch("fix/issue-9901")

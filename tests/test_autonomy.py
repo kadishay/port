@@ -95,20 +95,20 @@ def test_risk_escalate_for_auth_keyword():
 # evaluate_autonomy tests (severity × risk matrix)
 # ---------------------------------------------------------------------------
 
-def test_auto_merge_high_severity_low_risk():
+def test_auto_pr_high_severity_low_risk():
     decision, reasons = evaluate_autonomy(_ctx(severity=Severity.HIGH, confidence=0.90), SMALL_DIFF)
-    assert decision == AutonomyDecision.AUTO_MERGE
+    assert decision == AutonomyDecision.AUTO_PR
     assert any("LOW risk" in r for r in reasons)
 
 
-def test_auto_merge_medium_severity_low_risk():
+def test_auto_pr_medium_severity_low_risk():
     decision, _ = evaluate_autonomy(_ctx(severity=Severity.MEDIUM, confidence=0.90), SMALL_DIFF)
-    assert decision == AutonomyDecision.AUTO_MERGE
+    assert decision == AutonomyDecision.AUTO_PR
 
 
-def test_auto_merge_low_severity_low_risk():
+def test_auto_pr_low_severity_low_risk():
     decision, _ = evaluate_autonomy(_ctx(severity=Severity.LOW, confidence=0.90), SMALL_DIFF)
-    assert decision == AutonomyDecision.AUTO_MERGE
+    assert decision == AutonomyDecision.AUTO_PR
 
 
 def test_hitl_for_critical_even_low_risk():
@@ -143,7 +143,7 @@ def test_model_cannot_lower_risk_below_rules(mock_model_risk):
     assert risk == RiskLevel.HIGH
 
 
-def test_auth_changes_require_hitl_not_auto_merge():
+def test_auth_changes_require_hitl_not_auto_pr():
     # ESCALATE risk no longer skips the fix entirely — it's still suggested via HITL,
     # just never auto-merged, even though this diff would otherwise qualify as LOW risk.
     diff_with_auth = SMALL_DIFF + "\n+// auth token handling\n"

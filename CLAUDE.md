@@ -39,8 +39,8 @@ Webhook (port 9090) ← ngrok tunnel
 Orchestrator (Python)
        ├─ Triage Agent (Haiku parse → Opus root cause → Haiku classify)
        ├─ Autonomy Check (rules: severity, files, lines, confidence, keywords)
-       └─ Solve Agent (Opus fix proposal → auto-merge OR HITL)
-            ├─ AUTO_MERGE: apply patch → tests → PR (no human needed)
+       └─ Solve Agent (Opus fix proposal → auto-PR OR HITL)
+            ├─ AUTO_PR: apply patch → tests → PR (no human needed)
             └─ HITL_REQUIRED: post diff → wait for /approve or /reject
                  (auth/migration/security-sensitive diffs always land here — never auto-merged, but still get a suggested fix)
 ```
@@ -104,11 +104,11 @@ if (task.done && currentView.doneBucketId !== 0 && currentTaskBucket.id !== curr
 
 ## Autonomy Decision Matrix
 
-The agent auto-merges if ALL criteria are met; otherwise requires HITL.
+The agent opens the PR automatically (no pre-approval gate) if ALL criteria are met; otherwise requires HITL. Either way a human still merges the PR on GitHub — see `docs/v1-flow.md`.
 
 | Criteria | Threshold | Notes |
 |----------|-----------|-------|
-| Severity | HIGH or lower | Never auto-merge CRITICAL (alert human but attempt fix) |
+| Severity | HIGH or lower | Never skip HITL for CRITICAL (alert human but attempt fix) |
 | Files changed | ≤ 2 files | Both demo bugs touch 1 file |
 | Lines changed | ≤ 30 lines | Both demo bugs are 1-line fixes |
 | Tests | All existing pass, no test files modified | Run backend tests + frontend unit tests |
@@ -122,7 +122,7 @@ The agent auto-merges if ALL criteria are met; otherwise requires HITL.
 
 These are detected via a keyword match on the diff plus a Haiku semantic pass (which can flag e.g. password-verification code even when no keyword matches literally). Either signal forces `HITL_REQUIRED`, overriding whatever the size/confidence rules would otherwise say — a human must approve before the fix merges, but the agent still writes and proposes it. There is no longer an "escalate with no fix attempt" path.
 
-Both demo bugs meet auto-merge criteria.
+Both demo bugs meet auto-PR criteria.
 
 ---
 

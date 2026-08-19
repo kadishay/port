@@ -2,7 +2,7 @@
 
 This document walks through the complete lifecycle of a bug, from a GitHub issue being opened to a pull request being opened on GitHub (or a human being asked to approve/fix it). Every step maps to actual code in `agent/`.
 
-**The agent never merges a PR itself, in any path.** `GitHubClient` (`agent/tools/github_tools.py`) has no `merge_pr` method — the codebase never calls GitHub's merge endpoint. `AUTO_MERGE` is the name of the *autonomy decision*, not a description of what the agent does at the end: in every outcome the agent's job ends at `create_pr()`. A human always clicks "Merge" on GitHub. The only thing the decision actually controls is whether a human has to `/approve` *before* the PR gets opened.
+**The agent never merges a PR itself, in any path.** `GitHubClient` (`agent/tools/github_tools.py`) has no `merge_pr` method — the codebase never calls GitHub's merge endpoint. `AUTO_PR` is the name of the *autonomy decision*, not a description of what the agent does at the end: in every outcome the agent's job ends at `create_pr()`. A human always clicks "Merge" on GitHub. The only thing the decision actually controls is whether a human has to `/approve` *before* the PR gets opened.
 
 ---
 
@@ -300,11 +300,11 @@ Example: issue #28 (`CheckUserPassword` / `bcrypt.CompareHashAndPassword` in `pk
 ```
 risk = ESCALATE (keyword OR Haiku semantic call)  →  HITL_REQUIRED  (still suggested, never auto-merged)
 severity = CRITICAL                               →  HITL_REQUIRED (always, even if LOW risk)
-risk = LOW                                         →  AUTO_MERGE
+risk = LOW                                         →  AUTO_PR
 risk = MEDIUM or HIGH                              →  HITL_REQUIRED
 ```
 
-> **Change log:** there used to be a third outcome, `ESCALATE_ONLY`, which skipped writing a fix entirely and just posted a comment telling a human to fix it manually. That path was removed — ESCALATE risk (auth/security-sensitive diffs) now routes into `HITL_REQUIRED` like everything else above LOW risk. The agent still writes and proposes the fix; a human just has to approve it before it merges. `AutonomyDecision` only has two members now: `AUTO_MERGE` and `HITL_REQUIRED`.
+> **Change log:** there used to be a third outcome, `ESCALATE_ONLY`, which skipped writing a fix entirely and just posted a comment telling a human to fix it manually. That path was removed — ESCALATE risk (auth/security-sensitive diffs) now routes into `HITL_REQUIRED` like everything else above LOW risk. The agent still writes and proposes the fix; a human just has to approve it before it merges. `AutonomyDecision` only has two members now: `AUTO_PR` and `HITL_REQUIRED`. The first member was also renamed from `AUTO_MERGE` — see the callout at the top of this doc for why: the agent only ever opens a PR, it never merges one.
 
 ### 4e. Solution Decision
 
@@ -314,16 +314,16 @@ The output of `evaluate_autonomy()` routes to one of two paths.
 
 | Outcome | Triggered by | Human needed to open the PR? | Human needed to merge it? |
 |---|---|---|---|
-| **PR opened automatically** (`AUTO_MERGE`) | risk = LOW (rules + Haiku agree) AND severity ≠ CRITICAL | No | **Yes, always** — agent stops at `create_pr()` |
+| **PR opened automatically** (`AUTO_PR`) | risk = LOW (rules + Haiku agree) AND severity ≠ CRITICAL | No | **Yes, always** — agent stops at `create_pr()` |
 | **Fix suggested, needs approval** (`HITL_REQUIRED`) | risk = MEDIUM/HIGH, **or** risk = ESCALATE (keyword or Haiku's semantic auth/permissions/data-integrity judgment), **or** severity = CRITICAL (even on a LOW-risk 1-line fix) | Yes — reply `/approve` or `/reject` on the issue (or Slack), 30 min timeout | **Yes, always** — same as above |
 
-ESCALATE risk and CRITICAL severity both just add another reason to route into `HITL_REQUIRED` — they don't create a separate "no fix attempted" outcome. Even a diff that touches auth-shaped code (see the #28 example above — Haiku flagged `CheckUserPassword` as ESCALATE with no literal keyword match) still gets a fix written and proposed; it's only forced out of `AUTO_MERGE` into human review.
+ESCALATE risk and CRITICAL severity both just add another reason to route into `HITL_REQUIRED` — they don't create a separate "no fix attempted" outcome. Even a diff that touches auth-shaped code (see the #28 example above — Haiku flagged `CheckUserPassword` as ESCALATE with no literal keyword match) still gets a fix written and proposed; it's only forced out of `AUTO_PR` into human review.
 
-The last column is the same for both rows on purpose: the agent's involvement ends at opening the PR either way. `AUTO_MERGE` only skips the *pre-PR* approval gate — it does not skip the merge itself.
+The last column is the same for both rows on purpose: the agent's involvement ends at opening the PR either way. `AUTO_PR` only skips the *pre-PR* approval gate — it does not skip the merge itself.
 
 ---
 
-#### AUTO_MERGE
+#### AUTO_PR
 **Selected when:** risk level is LOW (rules + Haiku both agree) AND severity is not CRITICAL.
 
 **What happens:**
@@ -345,7 +345,7 @@ No human is involved *before* the PR is opened — no `/approve` gate, no diff c
 **What happens:**
 1. Posts a comment to the issue containing severity, confidence, risk level, risk reasons, and the full diff (up to 3000 chars), with instructions to reply `/approve` or `/reject`
 2. `wait_for_approval()` polls GitHub comments every 60 seconds for up to 30 minutes
-3. `/approve` → proceeds to commit + push + PR (same as AUTO_MERGE above)
+3. `/approve` → proceeds to commit + push + PR (same as AUTO_PR above)
 4. `/reject` → deletes the fix branch, posts a rejection acknowledgement
 5. Timeout → deletes the fix branch, posts a timeout notice
 
@@ -415,7 +415,7 @@ Measured 2026-08-19 by running each demo bug through the real triage → solve p
 | Avg wall-clock time | **~67s** (63s – 73s) | **~89s** (84s – 92s) | **~103s** |
 | Avg cost | **~$0.13** ($0.11 – $0.14) | **~$0.18** ($0.16 – $0.19) | **~$0.23** |
 | Avg tokens (in / out) | ~95,400 in / ~6,680 out | ~126,300 in / ~10,100 out | ~199,800 in / ~5,500 out |
-| Autonomy decision | `AUTO_MERGE`, all 3 runs | Confidence 0.72–0.85, below the 0.85 `AUTO_MERGE` floor — routes to HITL | — |
+| Autonomy decision | `AUTO_PR`, all 3 runs | Confidence 0.72–0.85, below the 0.85 `AUTO_PR` floor — routes to HITL | — |
 
 FE costs more than BE mainly because `kanban.ts` has two near-identical conditions (line 173 and 178, see the docstring in `test_frontend_bug_kanban_done_bucket`), so root-cause analysis and the fix loop both need more back-and-forth to disambiguate than the single unambiguous `done = true` in the backend query.
 
@@ -451,9 +451,9 @@ solve.py
   ├─ verify fix                     Playwright (FE) or curl (BE) re-run → pass/fail + evidence
   ├─ git diff                       capture proposed_diff
   ├─ evaluate_risk()                LOW / MEDIUM / HIGH / ESCALATE
-  └─ Solution Decision              AUTO_MERGE / HITL_REQUIRED
+  └─ Solution Decision              AUTO_PR / HITL_REQUIRED
     │
-    ├─ AUTO_MERGE     ──▶ git commit + push → create PR → post success comment
+    ├─ AUTO_PR     ──▶ git commit + push → create PR → post success comment
     │                     (only when risk = LOW and severity ≠ CRITICAL)
     │                     PR sits open — a human still merges it on GitHub
     │
@@ -461,7 +461,7 @@ solve.py
                           (risk = MEDIUM/HIGH/ESCALATE, or severity = CRITICAL)
                               │
                               ├─ /approve  ──▶ git commit + push → create PR
-                              │               (PR sits open — human merges on GitHub, same as AUTO_MERGE)
+                              │               (PR sits open — human merges on GitHub, same as AUTO_PR)
                               ├─ /reject   ──▶ delete branch, acknowledge
                               └─ timeout   ──▶ delete branch, notify
     │
@@ -568,7 +568,7 @@ triggering any reminders.
    - Haiku checks git history to confirm original value was `done = false`
    - Writes the 1-line fix, commits immediately to `fix/issue-N`
    - Risk evaluated: 1 file, 1 line, confidence ≥ 0.85 → **LOW risk**
-   - Decision: **AUTO_MERGE**
+   - Decision: **AUTO_PR**
    - Pushes branch, opens PR, posts success comment with PR link
 
 **To reset:**
@@ -623,7 +623,7 @@ Actual: task stays in its original bucket
 3. **Solve:**
    - Haiku reads `kanban.ts` and writes the fix (flips `===` to `!==`)
    - Risk evaluated: 1 file, 1 line, confidence ≥ 0.85 → **LOW risk**
-   - Decision: **AUTO_MERGE**
+   - Decision: **AUTO_PR**
    - Commits to `fix/issue-N`, pushes, opens PR
    - Success comment posted to issue with PR link
 
@@ -656,7 +656,7 @@ To demonstrate the human-in-the-loop flow, temporarily lower the confidence thre
 | Fix branch created | `kadishay/vikunja` → branches |
 | PR opened | `kadishay/vikunja` → pull requests |
 | Success comment | GitHub issue → final comment with PR link |
-| Merging the PR | Manual — click "Merge pull request" yourself. The agent stops at opening it, in every path, including `AUTO_MERGE`. |
+| Merging the PR | Manual — click "Merge pull request" yourself. The agent stops at opening it, in every path, including `AUTO_PR`. |
 
 ---
 

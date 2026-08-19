@@ -119,7 +119,7 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
         _abort_fix(ctx.repo_path, fix_branch)
         return ctx
 
-    if decision == AutonomyDecision.AUTO_MERGE:
+    if decision == AutonomyDecision.AUTO_PR:
         return _push_and_open_pr(ctx, gh)
 
     # HITL required — notify both GitHub and Slack
@@ -463,7 +463,7 @@ def _hitl_comment(ctx: BugContext, diff: str, reasons: list[str]) -> str:
 
 
 def _pr_body(ctx: BugContext, diff: str) -> str:
-    auto = ctx.autonomy_decision == AutonomyDecision.AUTO_MERGE
+    auto = ctx.autonomy_decision == AutonomyDecision.AUTO_PR
     risk_line = f"**Risk:** {ctx.risk_level.value} ({'; '.join(ctx.risk_reasons)})\n\n" if ctx.risk_level else ""
     screenshots = ""
     if ctx.screenshot_before:
