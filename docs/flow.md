@@ -1,4 +1,4 @@
-# V1 System Flow — Bug Triage & Solve Agent
+# System Flow — Bug Triage & Solve Agent
 
 This document walks through the complete lifecycle of a bug, from a GitHub issue being opened to a pull request being opened on GitHub (or a human being asked to approve/fix it). Every step maps to actual code in `agent/`.
 

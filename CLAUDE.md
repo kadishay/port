@@ -104,7 +104,7 @@ if (task.done && currentView.doneBucketId !== 0 && currentTaskBucket.id !== curr
 
 ## Autonomy Decision Matrix
 
-The agent opens the PR automatically (no pre-approval gate) if ALL criteria are met; otherwise requires HITL. Either way a human still merges the PR on GitHub — see `docs/v1-flow.md`.
+The agent opens the PR automatically (no pre-approval gate) if ALL criteria are met; otherwise requires HITL. Either way a human still merges the PR on GitHub — see `docs/flow.md`.
 
 | Criteria | Threshold | Notes |
 |----------|-----------|-------|
@@ -318,7 +318,7 @@ Same as Phase 1, but:
 
 ## Cost Tracking
 
-**Per bug run (triage + solve), measured:** ~$0.13 backend / ~$0.18 frontend (no Playwright) / ~$0.23 frontend (Playwright on) — real numbers from `tests/test_demo_bugs_integration.py` runs, see `docs/v1-flow.md`'s "Recent execution averages" section for methodology. These are Haiku-only runs; add the Opus fallback cost (rare — only fires when confidence < 0.70 on root cause or backend verify) on top for runs that hit it.
+**Per bug run (triage + solve), measured:** ~$0.13 backend / ~$0.18 frontend (no Playwright) / ~$0.23 frontend (Playwright on) — real numbers from `tests/test_demo_bugs_integration.py` runs, see `docs/flow.md`'s "Recent execution averages" section for methodology. These are Haiku-only runs; add the Opus fallback cost (rare — only fires when confidence < 0.70 on root cause or backend verify) on top for runs that hit it.
 
 **Budget headroom:** $50 / ~$0.20 ≈ 250 bug runs. Plenty for demo + iteration.
 
