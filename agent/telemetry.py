@@ -77,8 +77,8 @@ def record_run(ctx: BugContext, tracker: CostTracker, duration_seconds: float, c
         print(f"[telemetry] SUPABASE_URL/SUPABASE_SERVICE_KEY not set — skipping telemetry write for #{ctx.issue_number}", flush=True)
         return
 
-    row = build_row(ctx, tracker, duration_seconds, crashed)
     try:
+        row = build_row(ctx, tracker, duration_seconds, crashed)
         r = requests.post(
             f"{url}/rest/v1/{_SUPABASE_TABLE}",
             headers={
@@ -91,5 +91,5 @@ def record_run(ctx: BugContext, tracker: CostTracker, duration_seconds: float, c
             timeout=10,
         )
         r.raise_for_status()
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"[telemetry] failed to record run for #{ctx.issue_number}: {e}", flush=True)
