@@ -144,25 +144,27 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
 
     max_tool_calls = 20 if use_browser else 4
     kanban_hint = (
-        "\nKANBAN REPRODUCTION STEPS (follow exactly in order):\n"
-        "1. browser_navigate 'http://localhost:4173'\n"
-        "2. browser_evaluate 'localStorage.setItem(\"API_URL\", \"http://localhost:3456\")'\n"
-        "3. browser_navigate 'http://localhost:4173'  (reload to pick up the API URL)\n"
-        "4. browser_wait 1000ms\n"
-        f"5. browser_type '#username' '{vikunja_username}'\n"
-        f"6. browser_type '#password' '{vikunja_password}'\n"
-        "7. browser_press '#password' 'Enter'  (submits the login form)\n"
-        "8. browser_wait 2000ms for redirect after login\n"
-        "9. browser_navigate 'http://localhost:4173/projects/3/20'\n"
-        "10. browser_wait 3000ms for Kanban columns to load\n"
-        f"11. browser_screenshot 'bug-{ctx.issue_number}-before.png'  — captures initial state: tasks in To-Do, Done column empty\n"
-        "12. browser_click '.kanban-card__title-link'  (click first task card title in To-Do)\n"
-        "13. browser_wait 2000ms for task detail page to load\n"
-        "14. browser_click '.button--mark-done'\n"
-        "15. browser_wait 2000ms\n"
-        "16. browser_go_back  (go BACK to the Kanban — do NOT browser_navigate, that would reload fresh data)\n"
-        "17. browser_wait 2000ms\n"
-        f"18. browser_screenshot 'bug-{ctx.issue_number}-before.png'  — BUG PROOF: task has 'Done' badge but stayed in To-Do column (did NOT move to Done column)\n"
+        f"\nKANBAN STEPS — call these browser tools IN THIS EXACT ORDER, one per tool call:\n"
+        f"1) browser_navigate 'http://localhost:4173'\n"
+        f"2) browser_evaluate 'localStorage.setItem(\"API_URL\",\"http://localhost:3456\")'\n"
+        f"3) browser_navigate 'http://localhost:4173'\n"
+        f"4) browser_wait 1000\n"
+        f"5) browser_type '#username' '{vikunja_username}'\n"
+        f"6) browser_type '#password' '{vikunja_password}'\n"
+        f"7) browser_press '#password' 'Enter'\n"
+        f"8) browser_wait 2000\n"
+        f"9) browser_navigate 'http://localhost:4173/projects/3/20'\n"
+        f"10) browser_wait 3000\n"
+        f"11) browser_screenshot 'bug-{ctx.issue_number}-before.png'\n"
+        f"12) browser_click '.kanban-card__title-link'\n"
+        f"13) browser_wait 2000\n"
+        f"14) browser_click '.button--mark-done'\n"
+        f"15) browser_wait 2000\n"
+        f"16) browser_go_back\n"
+        f"17) browser_wait 2000\n"
+        f"18) browser_screenshot 'bug-{ctx.issue_number}-before.png'\n"
+        f"After step 18, STOP all tool calls. The bug is visible in the last screenshot: "
+        f"task has 'Done' badge but remained in To-Do column. Summarize what you saw.\n"
         if (use_browser and "kanban" in ctx.issue_title.lower()) else ""
     )
 
@@ -320,6 +322,25 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         tracker.record(response.model, response.usage)
 
         if response.stop_reason == "end_turn":
+            # Check if the response is already valid JSON; if not, force one more round
+            _text = next((b.text for b in response.content if b.type == "text"), "")
+            try:
+                _extract_json(_text)
+                break  # Valid JSON — done
+            except Exception:
+                pass  # Prose response — fall through to force JSON below
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": [{
+                "type": "text",
+                "text": (
+                    "Stop. Output ONLY valid JSON now. No prose, no markdown, no explanation.\n"
+                    '{"root_cause": "one sentence", "confidence": 0.XX, "files": ["relative/path"], "buggy_pattern": "exact wrong string"}'
+                ),
+            }]})
+            response = client.messages.create(
+                model="claude-haiku-4-5", max_tokens=256, messages=messages,
+            )
+            tracker.record(response.model, response.usage)
             break
 
         tool_results = []
