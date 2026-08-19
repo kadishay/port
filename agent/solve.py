@@ -7,8 +7,8 @@ from agent.tools.shell_tools import run_shell, git_diff
 from agent.tools.file_tools import read_file, write_file
 from agent.tools.browser_tools import (
     BROWSER_TOOLS, browser_navigate, browser_click, browser_type,
-    browser_get_text, browser_screenshot, browser_wait, close_browser,
-    playwright_enabled,
+    browser_get_text, browser_screenshot, browser_wait, browser_evaluate,
+    browser_press, browser_go_back, close_browser, playwright_enabled,
 )
 from agent.autonomy import evaluate_autonomy
 from agent.hitl import wait_for_approval, HITLTimeout
@@ -116,15 +116,24 @@ def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
     vikunja_password = os.environ.get("VIKUNJA_PASSWORD", "")
     is_kanban = "kanban" in (ctx.issue_title or "").lower()
     kanban_verify = (
-        "\nKANBAN VERIFY STEPS:\n"
-        "1. browser_navigate http://localhost:4173\n"
-        f"2. Log in: fill '#username' with '{vikunja_username}', fill '#password' with '{vikunja_password}', click 'button[type=submit]'\n"
-        "3. browser_wait 2000ms\n"
-        "4. browser_navigate http://localhost:4173/projects/3/20  (project 3, Kanban view 20)\n"
-        "5. browser_wait 2000ms for Kanban columns to load\n"
-        "6. Find a task that is NOT in the Done column. Click its checkbox.\n"
-        "7. browser_wait 2000ms for animation to complete\n"
-        f"8. browser_screenshot 'bug-{ctx.issue_number}-after.png' — should show task moved to Done column (fix works!)\n"
+        "\nKANBAN VERIFY STEPS (follow exactly):\n"
+        "1. browser_navigate 'http://localhost:4173'\n"
+        "2. browser_evaluate 'localStorage.setItem(\"API_URL\", \"http://localhost:3456\")'\n"
+        "3. browser_navigate 'http://localhost:4173'\n"
+        "4. browser_wait 1000ms\n"
+        f"5. browser_type '#username' '{vikunja_username}'\n"
+        f"6. browser_type '#password' '{vikunja_password}'\n"
+        "7. browser_press '#password' 'Enter'\n"
+        "8. browser_wait 2000ms\n"
+        "9. browser_navigate 'http://localhost:4173/projects/3/20'\n"
+        "10. browser_wait 3000ms for Kanban to load\n"
+        "11. browser_click '.kanban-card__title-link'  (click first task in To-Do)\n"
+        "12. browser_wait 2000ms\n"
+        "13. browser_click '.button--mark-done'\n"
+        "14. browser_wait 2000ms\n"
+        "15. browser_go_back  (IMPORTANT: use go_back, not navigate, to keep Kanban state in memory)\n"
+        "16. browser_wait 2000ms\n"
+        f"17. browser_screenshot 'bug-{ctx.issue_number}-after.png'  — FIX VERIFIED: task should now appear in Done column (not To-Do)\n"
         if is_kanban else ""
     )
 
@@ -185,6 +194,12 @@ def _execute_browser_tool(name: str, inputs: dict) -> str:
         return browser_screenshot(inputs["filename"])
     if name == "browser_wait":
         return browser_wait(inputs.get("milliseconds", 1000))
+    if name == "browser_evaluate":
+        return browser_evaluate(inputs["script"])
+    if name == "browser_press":
+        return browser_press(inputs["selector"], inputs["key"])
+    if name == "browser_go_back":
+        return browser_go_back()
     return f"Unknown browser tool: {name}"
 
 

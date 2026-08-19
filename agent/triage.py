@@ -7,8 +7,8 @@ from agent.tools.shell_tools import run_shell, git_find_introducer_sha
 from agent.tools.file_tools import read_file
 from agent.tools.browser_tools import (
     BROWSER_TOOLS, browser_navigate, browser_click, browser_type,
-    browser_get_text, browser_screenshot, browser_wait, close_browser,
-    playwright_enabled,
+    browser_get_text, browser_screenshot, browser_wait, browser_evaluate,
+    browser_press, browser_go_back, close_browser, playwright_enabled,
 )
 from agent.cost_tracker import CostTracker
 
@@ -135,23 +135,34 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
     login_instruction = ""
     if use_browser and vikunja_username and vikunja_password:
         login_instruction = (
-            f"Before reproducing: navigate to http://localhost:4173, log in with "
-            f"username '{vikunja_username}' and password '{vikunja_password}'. "
+            f"Before reproducing: browser_navigate 'http://localhost:4173', "
+            f"browser_evaluate 'localStorage.setItem(\"API_URL\",\"http://localhost:3456\")', "
+            f"browser_navigate 'http://localhost:4173', browser_wait 1000ms, "
+            f"browser_type '#username' '{vikunja_username}', browser_type '#password' '{vikunja_password}', "
+            f"browser_press '#password' 'Enter', browser_wait 2000ms. "
         )
 
-    max_tool_calls = 8 if use_browser else 4
+    max_tool_calls = 20 if use_browser else 4
     kanban_hint = (
-        "\nKANBAN NAVIGATION STEPS:\n"
-        "1. browser_navigate http://localhost:4173\n"
-        f"2. Log in: fill '#username' with '{vikunja_username}', fill '#password' with '{vikunja_password}', click 'button[type=submit]'\n"
-        "3. browser_wait 2000ms for redirect after login\n"
-        "4. browser_navigate http://localhost:4173/projects/3/20  (project 3, Kanban view 20)\n"
-        "5. browser_wait 2000ms for Kanban columns to load\n"
-        f"6. browser_screenshot 'bug-{ctx.issue_number}-before-action.png' — capture Kanban with task in its bucket\n"
-        "7. Find a task checkbox: look for 'input.task-checkbox', '.task-list-item .done-checkbox', or '.task .checkbox'\n"
-        "   Click the checkbox for any task that is NOT in the Done column\n"
-        "8. browser_wait 1500ms for the UI to update\n"
-        f"9. browser_screenshot 'bug-{ctx.issue_number}-before.png' — shows bug: task did NOT move to Done column\n"
+        "\nKANBAN REPRODUCTION STEPS (follow exactly in order):\n"
+        "1. browser_navigate 'http://localhost:4173'\n"
+        "2. browser_evaluate 'localStorage.setItem(\"API_URL\", \"http://localhost:3456\")'\n"
+        "3. browser_navigate 'http://localhost:4173'  (reload to pick up the API URL)\n"
+        "4. browser_wait 1000ms\n"
+        f"5. browser_type '#username' '{vikunja_username}'\n"
+        f"6. browser_type '#password' '{vikunja_password}'\n"
+        "7. browser_press '#password' 'Enter'  (submits the login form)\n"
+        "8. browser_wait 2000ms for redirect after login\n"
+        "9. browser_navigate 'http://localhost:4173/projects/3/20'\n"
+        "10. browser_wait 3000ms for Kanban columns to load\n"
+        f"11. browser_screenshot 'bug-{ctx.issue_number}-before.png'  — captures initial state: tasks in To-Do, Done column empty\n"
+        "12. browser_click '.kanban-card__title-link'  (click first task card title in To-Do)\n"
+        "13. browser_wait 2000ms for task detail page to load\n"
+        "14. browser_click '.button--mark-done'\n"
+        "15. browser_wait 2000ms\n"
+        "16. browser_go_back  (go BACK to the Kanban — do NOT browser_navigate, that would reload fresh data)\n"
+        "17. browser_wait 2000ms\n"
+        f"18. browser_screenshot 'bug-{ctx.issue_number}-before.png'  — BUG PROOF: task has 'Done' badge but stayed in To-Do column (did NOT move to Done column)\n"
         if (use_browser and "kanban" in ctx.issue_title.lower()) else ""
     )
 
@@ -186,7 +197,7 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
     }]
     log_parts: list[str] = []
     screenshot_paths: list[str] = []
-    max_iterations = 9 if use_browser else 5
+    max_iterations = 20 if use_browser else 5
 
     for iteration in range(max_iterations):
         print(f"[triage] #{ctx.issue_number} — reproduce iteration {iteration + 1}", flush=True)
@@ -461,4 +472,10 @@ def _execute_tool(name: str, inputs: dict, repo_path: str) -> str:
         return browser_screenshot(inputs["filename"])
     if name == "browser_wait":
         return browser_wait(inputs.get("milliseconds", 1000))
+    if name == "browser_evaluate":
+        return browser_evaluate(inputs["script"])
+    if name == "browser_press":
+        return browser_press(inputs["selector"], inputs["key"])
+    if name == "browser_go_back":
+        return browser_go_back()
     return f"Unknown tool: {name}"

@@ -72,6 +72,38 @@ def browser_wait(milliseconds: int = 1000) -> str:
     return f"Waited {milliseconds}ms"
 
 
+def browser_press(selector: str, key: str) -> str:
+    """Press a key on a focused element (e.g., 'Enter', 'Tab', 'Escape')."""
+    page = _get_page()
+    try:
+        page.press(selector, key, timeout=5000)
+        page.wait_for_timeout(200)
+        return f"Pressed '{key}' on '{selector}'"
+    except Exception as e:
+        return f"Press failed for '{selector}' key '{key}': {e}"
+
+
+def browser_evaluate(script: str) -> str:
+    """Run a JavaScript expression in the browser page context."""
+    page = _get_page()
+    try:
+        result = page.evaluate(script)
+        return f"OK: {result}"
+    except Exception as e:
+        return f"Evaluate failed: {e}"
+
+
+def browser_go_back() -> str:
+    """Navigate back in browser history."""
+    page = _get_page()
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=10000)
+        page.wait_for_timeout(800)
+        return f"Navigated back — now at: {page.url}"
+    except Exception as e:
+        return f"go_back failed: {e}"
+
+
 def close_browser() -> None:
     if getattr(_local, "page", None):
         _local.browser.close()
@@ -137,6 +169,36 @@ BROWSER_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {"milliseconds": {"type": "integer", "default": 1000}},
+            "required": [],
+        },
+    },
+    {
+        "name": "browser_press",
+        "description": "Press a keyboard key on an element (e.g. 'Enter' to submit a form). Use 'browser_press' with selector '#password' and key 'Enter' to submit the login form.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string"},
+                "key": {"type": "string", "description": "Key to press, e.g. 'Enter', 'Tab', 'Escape'"},
+            },
+            "required": ["selector", "key"],
+        },
+    },
+    {
+        "name": "browser_evaluate",
+        "description": "Run a JavaScript expression in the browser page. Use to set localStorage, read DOM values, etc. E.g. 'localStorage.setItem(\"API_URL\", \"http://localhost:3456\")'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"script": {"type": "string"}},
+            "required": ["script"],
+        },
+    },
+    {
+        "name": "browser_go_back",
+        "description": "Navigate back in browser history (like pressing the browser Back button).",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     },
