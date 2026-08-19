@@ -14,6 +14,10 @@ from agent.cost_tracker import CostTracker
 
 client = anthropic.Anthropic()
 
+_HAIKU = "claude-haiku-4-5"
+_OPUS = "claude-opus-4-8"
+_OPUS_RETRY_CONFIDENCE_THRESHOLD = 0.70
+
 
 def _extract_json(text: str) -> dict:
     import re
@@ -87,7 +91,29 @@ def run_triage(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCo
     print(f"[triage] #{ctx.issue_number} — root cause analysis", flush=True)
     _t0 = _time.time()
     ctx.root_cause, ctx.confidence, ctx.affected_files, ctx.buggy_pattern = _analyze_root_cause(ctx, tracker)
-    print(f"[triage] #{ctx.issue_number} — root cause done in {_time.time() - _t0:.1f}s", flush=True)
+    print(f"[triage] #{ctx.issue_number} — root cause done in {_time.time() - _t0:.1f}s (confidence={ctx.confidence:.2f})", flush=True)
+
+    if ctx.confidence < _OPUS_RETRY_CONFIDENCE_THRESHOLD:
+        print(
+            f"[triage] #{ctx.issue_number} — confidence {ctx.confidence:.2f} < "
+            f"{_OPUS_RETRY_CONFIDENCE_THRESHOLD} — retrying root cause with Opus",
+            flush=True,
+        )
+        _t1 = _time.time()
+        retry_note = (
+            f"A faster model already analyzed this and reported low confidence "
+            f"({ctx.confidence:.2f}): root_cause={ctx.root_cause!r}, files={ctx.affected_files}, "
+            f"buggy_pattern={ctx.buggy_pattern!r}. Verify this or dig deeper — read more files if "
+            f"needed — and report a more confident answer.\n\n"
+        )
+        ctx.root_cause, ctx.confidence, ctx.affected_files, ctx.buggy_pattern = _analyze_root_cause(
+            ctx, tracker, model=_OPUS, retry_note=retry_note
+        )
+        print(
+            f"[triage] #{ctx.issue_number} — Opus retry done in {_time.time() - _t1:.1f}s "
+            f"(confidence={ctx.confidence:.2f})",
+            flush=True,
+        )
 
     print(f"[triage] #{ctx.issue_number} — finding relevant people", flush=True)
     _find_relevant_people(ctx, gh)
@@ -306,11 +332,11 @@ _REPORT_TOOL = {
 }
 
 
-def _force_tool_extraction(prose: str, ctx: BugContext, tracker: CostTracker) -> tuple[str, float, list[str], str]:
+def _force_tool_extraction(prose: str, ctx: BugContext, tracker: CostTracker, model: str = _HAIKU) -> tuple[str, float, list[str], str]:
     """Extract structured root-cause data by forcing a tool call — model cannot return prose."""
     content = f"Issue: {ctx.issue_title}\n\nYour analysis so far:\n{prose[:3000]}\n\nCall report_root_cause with your findings."
     response = client.messages.create(
-        model="claude-haiku-4-5",
+        model=model,
         max_tokens=512,
         tools=[_REPORT_TOOL],
         tool_choice={"type": "tool", "name": "report_root_cause"},
@@ -329,7 +355,9 @@ def _force_tool_extraction(prose: str, ctx: BugContext, tracker: CostTracker) ->
     raise ValueError("Forced tool extraction returned no report_root_cause call")
 
 
-def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, float, list[str], str]:
+def _analyze_root_cause(
+    ctx: BugContext, tracker: CostTracker, model: str = _HAIKU, retry_note: str = "",
+) -> tuple[str, float, list[str], str]:
     is_fe = _is_frontend_bug(ctx.issue_title)
     search_dir = f"{ctx.repo_path}/frontend/src" if is_fe else f"{ctx.repo_path}/pkg/models"
     file_ext = "*.ts or *.vue" if is_fe else "*.go"
@@ -338,6 +366,7 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
     messages = [{
         "role": "user",
         "content": (
+            f"{retry_note}"
             f"Find the root cause of this Vikunja bug. Use up to 6 tool calls. Work systematically:\n\n"
             f"BUG TYPE: {bug_type}\n"
             f"SEARCH DIRECTORY: {search_dir}\n"
@@ -364,7 +393,7 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
 
     for _ in range(8):
         response = client.messages.create(
-            model="claude-haiku-4-5",
+            model=model,
             max_tokens=4096,
             tools=[*_ROOT_CAUSE_TOOLS, _REPORT_TOOL],
             messages=messages,
@@ -375,7 +404,7 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         for block in response.content:
             if block.type == "tool_use" and block.name == "report_root_cause":
                 d = block.input
-                print(f"[triage] root-cause via report_root_cause tool (confidence={d.get('confidence')})", flush=True)
+                print(f"[triage] root-cause via report_root_cause tool [{model}] (confidence={d.get('confidence')})", flush=True)
                 return (
                     d.get("root_cause", "Unknown"),
                     float(d.get("confidence", 0.5)),
@@ -427,8 +456,8 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
     else:
         last_prose = next((b.text for b in response.content if b.type == "text"), "") or last_prose
 
-    print(f"[triage] falling back to forced tool extraction (prose len={len(last_prose)})", flush=True)
-    return _force_tool_extraction(last_prose, ctx, tracker)
+    print(f"[triage] falling back to forced tool extraction [{model}] (prose len={len(last_prose)})", flush=True)
+    return _force_tool_extraction(last_prose, ctx, tracker, model=model)
 
 
 def _find_relevant_people(ctx: BugContext, gh: GitHubClient) -> None:

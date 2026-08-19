@@ -13,9 +13,12 @@ def main():
         from agent.orchestrator import run_pipeline
         ctx = run_pipeline(args.issue)
         print(f"\n=== Pipeline complete ===")
-        print(f"Severity: {ctx.severity} | Confidence: {ctx.confidence:.0%}")
-        print(f"Decision: {ctx.autonomy_decision}")
-        print(f"PR: {ctx.pr_url or 'none'}")
+        if ctx is None:
+            print("Skipped — issue already has an open PR.")
+        else:
+            print(f"Severity: {ctx.severity} | Confidence: {ctx.confidence:.0%}")
+            print(f"Decision: {ctx.autonomy_decision}")
+            print(f"PR: {ctx.pr_url or 'none'}")
     else:
         print("Starting webhook server on port 9090...")
         uvicorn.run("agent.webhook_server:app", host="0.0.0.0", port=9090, reload=False)

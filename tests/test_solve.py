@@ -22,6 +22,19 @@ def _end_turn(text: str):
     return r
 
 
+def _tool_use(name: str, input_dict: dict):
+    block = MagicMock()
+    block.type = "tool_use"
+    block.name = name
+    block.input = input_dict
+    block.id = "tool_1"
+    r = MagicMock()
+    r.stop_reason = "tool_use"
+    r.content = [block]
+    r.model = "claude-haiku-4-5"
+    return r
+
+
 @patch("agent.solve.evaluate_autonomy", return_value=(AutonomyDecision.AUTO_PR, ["all criteria met"]))
 @patch("agent.solve.git_diff", return_value="diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n")
 @patch("agent.solve.run_shell", return_value=("ok", "", 0))
@@ -51,3 +64,38 @@ def test_hitl_rejected_skips_pr(mock_client, mock_shell, mock_diff, mock_approva
     result = run_solve(ctx, mock_gh, CostTracker())
     mock_gh.create_pr.assert_not_called()
     mock_gh.post_comment.assert_called()
+
+
+@patch("agent.solve.client")
+def test_verify_fix_backend_low_confidence_retries_with_opus(mock_client):
+    from agent.solve import _verify_fix
+
+    mock_client.messages.create.side_effect = [
+        _tool_use("report_verification", {"fixed": False, "confidence": 0.4, "evidence": "unsure"}),
+        _tool_use("report_verification", {"fixed": True, "confidence": 0.9, "evidence": "confirmed fixed"}),
+    ]
+    ctx = _ctx(issue_title="Bug: overdue reminders fire for done tasks", reproduction_steps="curl ...")
+    _verify_fix(ctx, CostTracker())
+
+    assert ctx.fix_verified is True
+    assert ctx.verification_confidence == 0.9
+    assert mock_client.messages.create.call_count == 2
+    first_model = mock_client.messages.create.call_args_list[0].kwargs["model"]
+    second_model = mock_client.messages.create.call_args_list[1].kwargs["model"]
+    assert first_model == "claude-haiku-4-5"
+    assert second_model == "claude-opus-4-8"
+
+
+@patch("agent.solve.client")
+def test_verify_fix_backend_high_confidence_no_retry(mock_client):
+    from agent.solve import _verify_fix
+
+    mock_client.messages.create.return_value = _tool_use(
+        "report_verification", {"fixed": True, "confidence": 0.95, "evidence": "confirmed fixed"}
+    )
+    ctx = _ctx(issue_title="Bug: overdue reminders fire for done tasks", reproduction_steps="curl ...")
+    _verify_fix(ctx, CostTracker())
+
+    assert ctx.fix_verified is True
+    assert ctx.verification_confidence == 0.95
+    assert mock_client.messages.create.call_count == 1

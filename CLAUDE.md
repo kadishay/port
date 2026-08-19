@@ -47,7 +47,7 @@ Orchestrator (Python)
 
 **Models used:**
 - Haiku 4.5 ($1/$5 per MTok): all steps — parsing, reproduction, root cause (with read_file, capped at 5 iterations), classification, fix proposal, HITL polling
-- Opus 4.8: not used (Haiku sufficient for single-file logic bugs at 5× lower cost and ~5× faster)
+- Opus 4.8 ($5/$25 per MTok): fallback only — one retry when Haiku's confidence is < 0.70 on root cause analysis (triage 2d) or backend curl verification (solve 4b²). Haiku alone is sufficient for single-file logic bugs at 5× lower cost and ~5× faster; Opus only kicks in on the minority of runs where Haiku hedges.
 
 **Cost per bug:** ~$0.05–0.10 total
 
@@ -318,12 +318,9 @@ Same as Phase 1, but:
 
 ## Cost Tracking
 
-**Per bug run (triage + solve):**
-- Haiku (parsing, classify): ~$0.001
-- Opus (root cause, fix proposal, both with thinking): ~$0.15–0.20
-- **Total per bug: ~$0.20**
+**Per bug run (triage + solve), measured:** ~$0.13 backend / ~$0.18 frontend (no Playwright) / ~$0.23 frontend (Playwright on) — real numbers from `tests/test_demo_bugs_integration.py` runs, see `docs/v1-flow.md`'s "Recent execution averages" section for methodology. These are Haiku-only runs; add the Opus fallback cost (rare — only fires when confidence < 0.70 on root cause or backend verify) on top for runs that hit it.
 
-**Budget headroom:** $50 / $0.20 = 250 bug runs. Plenty for demo + iteration.
+**Budget headroom:** $50 / ~$0.20 ≈ 250 bug runs. Plenty for demo + iteration.
 
 ---
 

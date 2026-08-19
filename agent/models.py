@@ -42,6 +42,7 @@ class BugContext:
     screenshot_before: str = ""
     screenshot_after: str = ""
     fix_verified: bool = False
+    verification_confidence: float = 0.0
     verification_log: str = ""
     affected_files: list[str] = field(default_factory=list)
     buggy_pattern: str = ""

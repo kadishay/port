@@ -43,6 +43,17 @@ class GitHubClient:
         )
         r.raise_for_status()
 
+    def get_open_pr_for_branch(self, branch: str) -> dict | None:
+        owner = self._repo.split("/")[0]
+        r = requests.get(
+            self._url("pulls"),
+            headers=self._headers,
+            params={"head": f"{owner}:{branch}", "state": "open"},
+        )
+        r.raise_for_status()
+        prs = r.json()
+        return prs[0] if prs else None
+
     def create_pr(self, title: str, body: str, head: str, base: str = "main") -> dict:
         r = requests.post(
             self._url("pulls"),

@@ -16,6 +16,10 @@ from agent.triage import _is_frontend_bug
 
 client = anthropic.Anthropic()
 
+_HAIKU = "claude-haiku-4-5"
+_OPUS = "claude-opus-4-8"
+_OPUS_RETRY_CONFIDENCE_THRESHOLD = 0.70
+
 _VERIFY_TOOLS = [
     {
         "name": "run_shell",
@@ -47,9 +51,10 @@ _REPORT_VERIFICATION_TOOL = {
         "type": "object",
         "properties": {
             "fixed": {"type": "boolean", "description": "true if the bug no longer reproduces"},
+            "confidence": {"type": "number", "description": "0.0–1.0 confidence in this verdict"},
             "evidence": {"type": "string", "description": "What you observed — e.g. curl status/body before vs after"},
         },
-        "required": ["fixed", "evidence"],
+        "required": ["fixed", "confidence", "evidence"],
     },
 }
 
@@ -144,11 +149,27 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
 def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
     if _is_frontend_bug(ctx.issue_title):
         _verify_fix_frontend(ctx, tracker)
-    else:
-        _verify_fix_backend(ctx, tracker)
+        return
+
+    _verify_fix_backend(ctx, tracker)
+    if ctx.verification_confidence < _OPUS_RETRY_CONFIDENCE_THRESHOLD:
+        print(
+            f"[solve] #{ctx.issue_number} — verify confidence {ctx.verification_confidence:.2f} < "
+            f"{_OPUS_RETRY_CONFIDENCE_THRESHOLD} — retrying verification with Opus",
+            flush=True,
+        )
+        retry_note = (
+            f"A faster model already checked this and reported low confidence "
+            f"({ctx.verification_confidence:.2f}): fixed={ctx.fix_verified}, "
+            f"evidence={ctx.verification_log[:300]!r}. Look more carefully — re-run the checks "
+            f"yourself rather than just repeating the same shallow requests.\n\n"
+        )
+        _verify_fix_backend(ctx, tracker, model=_OPUS, retry_note=retry_note)
 
 
-def _verify_fix_backend(ctx: BugContext, tracker: CostTracker) -> None:
+def _verify_fix_backend(
+    ctx: BugContext, tracker: CostTracker, model: str = _HAIKU, retry_note: str = "",
+) -> None:
     """Re-run the reproduction curl commands against the live API and confirm the bug is gone."""
     if not ctx.reproduction_steps:
         return
@@ -160,6 +181,7 @@ def _verify_fix_backend(ctx: BugContext, tracker: CostTracker) -> None:
     messages = [{
         "role": "user",
         "content": (
+            f"{retry_note}"
             f"This bug has just been fixed in the code. Re-run the original reproduction steps "
             f"against the live API to confirm the bug is actually gone.\n\n"
             f"Issue: {ctx.issue_title}\n"
@@ -175,7 +197,7 @@ def _verify_fix_backend(ctx: BugContext, tracker: CostTracker) -> None:
 
     for _ in range(5):
         response = client.messages.create(
-            model="claude-haiku-4-5",
+            model=model,
             max_tokens=2048,
             tools=[*_VERIFY_TOOLS, _REPORT_VERIFICATION_TOOL],
             messages=messages,
@@ -186,10 +208,12 @@ def _verify_fix_backend(ctx: BugContext, tracker: CostTracker) -> None:
             if block.type == "tool_use" and block.name == "report_verification":
                 d = block.input
                 ctx.fix_verified = bool(d.get("fixed", False))
+                ctx.verification_confidence = float(d.get("confidence", 0.5))
                 ctx.verification_log = d.get("evidence", "")
                 print(
-                    f"[solve] #{ctx.issue_number} — verify via curl: "
-                    f"{'PASS' if ctx.fix_verified else 'FAIL'} — {ctx.verification_log[:200]}",
+                    f"[solve] #{ctx.issue_number} — verify via curl [{model}]: "
+                    f"{'PASS' if ctx.fix_verified else 'FAIL'} "
+                    f"(confidence={ctx.verification_confidence:.2f}) — {ctx.verification_log[:200]}",
                     flush=True,
                 )
                 return
@@ -211,12 +235,12 @@ def _verify_fix_backend(ctx: BugContext, tracker: CostTracker) -> None:
         messages.append({"role": "user", "content": tool_results})
 
     # Model never called report_verification (e.g. kept calling tools) — force a verdict.
-    _force_verification_verdict(ctx, tracker)
+    _force_verification_verdict(ctx, tracker, model=model)
 
 
-def _force_verification_verdict(ctx: BugContext, tracker: CostTracker) -> None:
+def _force_verification_verdict(ctx: BugContext, tracker: CostTracker, model: str = _HAIKU) -> None:
     response = client.messages.create(
-        model="claude-haiku-4-5",
+        model=model,
         max_tokens=512,
         tools=[_REPORT_VERIFICATION_TOOL],
         tool_choice={"type": "tool", "name": "report_verification"},
@@ -234,14 +258,17 @@ def _force_verification_verdict(ctx: BugContext, tracker: CostTracker) -> None:
         if block.type == "tool_use" and block.name == "report_verification":
             d = block.input
             ctx.fix_verified = bool(d.get("fixed", False))
+            ctx.verification_confidence = float(d.get("confidence", 0.3))
             ctx.verification_log = d.get("evidence", "inconclusive — ran out of tool calls")
             print(
-                f"[solve] #{ctx.issue_number} — verify via curl (forced): "
-                f"{'PASS' if ctx.fix_verified else 'FAIL'} — {ctx.verification_log[:200]}",
+                f"[solve] #{ctx.issue_number} — verify via curl (forced) [{model}]: "
+                f"{'PASS' if ctx.fix_verified else 'FAIL'} "
+                f"(confidence={ctx.verification_confidence:.2f}) — {ctx.verification_log[:200]}",
                 flush=True,
             )
             return
     ctx.fix_verified = False
+    ctx.verification_confidence = 0.0
     ctx.verification_log = "verification inconclusive — model returned no verdict"
 
 
@@ -480,7 +507,10 @@ def _pr_body(ctx: BugContext, diff: str) -> str:
     elif ctx.verification_log:
         status = "✅ Verified" if ctx.fix_verified else "⚠️ Verification inconclusive"
         verified_by = "Verified via curl"
-        verification = f"\n### Verification (curl)\n**{status}**\n```\n{ctx.verification_log[:1500]}\n```\n"
+        verification = (
+            f"\n### Verification (curl)\n**{status}** (confidence: {ctx.verification_confidence:.0%})\n"
+            f"```\n{ctx.verification_log[:1500]}\n```\n"
+        )
 
     return (
         f"Fixes #{ctx.issue_number}\n\n"
