@@ -287,6 +287,45 @@ _ROOT_CAUSE_TOOLS = [
 ]
 
 
+_REPORT_TOOL = {
+    "name": "report_root_cause",
+    "description": "Report your root cause findings as structured data.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "root_cause":    {"type": "string", "description": "One sentence: what is wrong and why"},
+            "confidence":    {"type": "number", "description": "0.0–1.0 confidence score"},
+            "files":         {"type": "array", "items": {"type": "string"}, "description": "Affected file paths"},
+            "buggy_pattern": {"type": "string", "description": "Exact wrong string/condition in the source"},
+        },
+        "required": ["root_cause", "confidence", "files", "buggy_pattern"],
+    },
+}
+
+
+def _force_tool_extraction(prose: str, ctx: BugContext, tracker: CostTracker) -> tuple[str, float, list[str], str]:
+    """Extract structured root-cause data by forcing a tool call — model cannot return prose."""
+    content = f"Issue: {ctx.issue_title}\n\nYour analysis so far:\n{prose[:3000]}\n\nCall report_root_cause with your findings."
+    response = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=512,
+        tools=[_REPORT_TOOL],
+        tool_choice={"type": "tool", "name": "report_root_cause"},
+        messages=[{"role": "user", "content": content}],
+    )
+    tracker.record(response.model, response.usage)
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "report_root_cause":
+            d = block.input
+            return (
+                d.get("root_cause", "Unknown"),
+                float(d.get("confidence", 0.5)),
+                d.get("files", []),
+                d.get("buggy_pattern", ""),
+            )
+    raise ValueError("Forced tool extraction returned no report_root_cause call")
+
+
 def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, float, list[str], str]:
     is_fe = _is_frontend_bug(ctx.issue_title)
     search_dir = f"{ctx.repo_path}/frontend/src" if is_fe else f"{ctx.repo_path}/pkg/models"
@@ -311,54 +350,53 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
             f"Issue: {ctx.issue_title}\n"
             f"Repo: {ctx.repo_path}\n\n"
             f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
-            "Respond with JSON only:\n"
-            '{"root_cause": "...", "confidence": 0.XX, '
-            '"files": ["relative/path/to/file.go"], '
-            '"buggy_pattern": "exact string that is wrong in the source"}'
+            "When done, call report_root_cause with your findings."
         ),
     }]
+
+    last_prose = ""
 
     for _ in range(8):
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=4096,
-            tools=_ROOT_CAUSE_TOOLS,
+            tools=[*_ROOT_CAUSE_TOOLS, _REPORT_TOOL],
             messages=messages,
         )
         tracker.record(response.model, response.usage)
 
-        if response.stop_reason == "end_turn":
-            _text = next((b.text for b in response.content if b.type == "text"), "")
-            try:
-                _extract_json(_text)
-                break  # Valid JSON — done
-            except Exception:
-                pass  # Prose response — extract JSON via a fresh call with no tool history
+        # Check for the structured report tool — this is the happy path
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "report_root_cause":
+                d = block.input
+                print(f"[triage] root-cause via report_root_cause tool (confidence={d.get('confidence')})", flush=True)
+                return (
+                    d.get("root_cause", "Unknown"),
+                    float(d.get("confidence", 0.5)),
+                    d.get("files", []),
+                    d.get("buggy_pattern", ""),
+                )
 
-            # Fresh call: no tool history so the model can't keep doing tool_use
-            response = client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=512,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Convert this bug analysis to JSON only. "
-                        "No prose, no markdown fences, no explanation — just the JSON object.\n\n"
-                        f"Analysis:\n{_text[:3000]}\n\n"
-                        "Output exactly this shape (fill in real values from the analysis above):\n"
-                        '{"root_cause": "one-sentence description of the exact bug", '
-                        '"confidence": 0.90, '
-                        '"files": ["relative/path/from/repo/root.ts"], '
-                        '"buggy_pattern": "exact wrong string or condition from the source code"}'
-                    ),
-                }],
-            )
-            tracker.record(response.model, response.usage)
-            break
+        if response.stop_reason == "end_turn":
+            # Model wrote prose instead of calling the tool — try JSON parse as a courtesy
+            _text = next((b.text for b in response.content if b.type == "text"), "")
+            last_prose = _text or last_prose
+            print(f"[triage] end_turn prose (first 200): {_text[:200]!r}", flush=True)
+            try:
+                data = _extract_json(_text)
+                print("[triage] root-cause extracted from inline JSON", flush=True)
+                return (
+                    data["root_cause"],
+                    float(data["confidence"]),
+                    data.get("files", []),
+                    data.get("buggy_pattern", ""),
+                )
+            except Exception:
+                break  # fall through to forced tool extraction
 
         tool_results = []
         for block in response.content:
-            if block.type == "tool_use":
+            if block.type == "tool_use" and block.name != "report_root_cause":
                 if block.name == "read_file":
                     try:
                         result = read_file(block.input["path"])
@@ -381,45 +419,10 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
     else:
-        # Exhausted iterations — force a final JSON-only response with no tools
-        messages.append({"role": "assistant", "content": response.content})
-        # Exhausted iterations — summarise what we know into a fresh JSON-only call
-        last_prose = next(
-            (b.text for b in response.content if b.type == "text"), ""
-        ) or "no text returned"
-        response = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=512,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Convert this bug analysis to JSON only. "
-                    "No prose, no markdown fences, no explanation — just the JSON object.\n\n"
-                    f"Analysis:\n{last_prose[:3000]}\n\n"
-                    "Output exactly this shape (fill in real values from the analysis above):\n"
-                    '{"root_cause": "one-sentence description of the exact bug", '
-                    '"confidence": 0.90, '
-                    '"files": ["relative/path/from/repo/root.ts"], '
-                    '"buggy_pattern": "exact wrong string or condition from the source code"}'
-                ),
-            }],
-        )
-        tracker.record(response.model, response.usage)
+        last_prose = next((b.text for b in response.content if b.type == "text"), "") or last_prose
 
-    text = next((b.text for b in response.content if b.type == "text"), None)
-    if not text:
-        raise ValueError(f"Root cause analysis returned no text. Content types: {[b.type for b in response.content]}")
-    print(f"[triage] root-cause response text (first 300 chars): {text[:300]!r}", flush=True)
-    try:
-        data = _extract_json(text)
-    except Exception as e:
-        raise ValueError(f"Root cause JSON parse failed: {e}\nRaw text: {text[:500]}")
-    return (
-        data["root_cause"],
-        float(data["confidence"]),
-        data.get("files", []),
-        data.get("buggy_pattern", ""),
-    )
+    print(f"[triage] falling back to forced tool extraction (prose len={len(last_prose)})", flush=True)
+    return _force_tool_extraction(last_prose, ctx, tracker)
 
 
 def _find_relevant_people(ctx: BugContext, gh: GitHubClient) -> None:
