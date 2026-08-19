@@ -161,16 +161,14 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
         f"8) browser_wait 2000\n"
         f"9) browser_navigate 'http://localhost:4173/projects/3/20'\n"
         f"10) browser_wait 3000\n"
-        f"11) browser_screenshot 'bug-{ctx.issue_number}-before.png'\n"
-        f"12) browser_click '.kanban-card__title-link'\n"
-        f"13) browser_wait 2000\n"
-        f"14) browser_click '.button--mark-done'\n"
-        f"15) browser_wait 2000\n"
-        f"16) browser_go_back\n"
-        f"17) browser_wait 2000\n"
-        f"18) browser_screenshot 'bug-{ctx.issue_number}-before.png'\n"
-        f"After step 18, STOP all tool calls. The bug is visible in the last screenshot: "
-        f"task has 'Done' badge but remained in To-Do column. Summarize what you saw.\n"
+        f"11) browser_click '.kanban-card__title-link'\n"
+        f"12) browser_wait 2000\n"
+        f"13) browser_click '.button--mark-done'\n"
+        f"14) browser_wait 2000\n"
+        f"15) browser_go_back\n"
+        f"16) browser_wait 3000\n"
+        f"After step 16, STOP immediately — do NOT call browser_screenshot. "
+        f"A screenshot will be taken automatically. Summarize what you observed.\n"
         if (use_browser and "kanban" in ctx.issue_title.lower()) else ""
     )
 
@@ -194,8 +192,10 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
                    f"{kanban_hint}"
                    f"Take a final browser_screenshot named 'bug-{ctx.issue_number}-before.png' showing the bug state.\n"
                    if use_browser else
-                   f"Run: find {ctx.repo_path}/frontend/src/stores -name '*.ts' | head -10, "
-                   "then read_file the most relevant TypeScript store file.\n")
+                   f"Run: find {ctx.repo_path}/frontend/src/stores -name '*.ts' | head -10 "
+                   f"to list store files, then read_file the most relevant one. "
+                   f"After reading, also run: grep -n 'Bucket\\|bucket\\|done' <that-file> | head -40 "
+                   f"to highlight the condition-heavy lines.\n")
                 if is_ui_bug else
                 "- This is a BACKEND bug. Use run_shell (curl with auth header) AND read_file on the "
                 "most relevant source file in pkg/models/. Do NOT use browser tools.\n"
@@ -204,7 +204,6 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
         ),
     }]
     log_parts: list[str] = []
-    screenshot_paths: list[str] = []
     max_iterations = 20 if use_browser else 5
 
     for iteration in range(max_iterations):
@@ -226,8 +225,6 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
             if block.type == "tool_use":
                 result = _execute_tool(block.name, block.input, ctx.repo_path)
                 log_parts.append(f"[{block.name}] {block.input}\n{result}")
-                if block.name == "browser_screenshot" and not result.startswith("Error"):
-                    screenshot_paths.append(result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -240,10 +237,16 @@ def _reproduce(ctx: BugContext, steps: str, tracker: CostTracker) -> str:
         print(f"[triage] #{ctx.issue_number} — reproduce hit max iterations ({max_iterations}), stopping", flush=True)
         log_parts.append(f"[truncated after {max_iterations} tool iterations]")
 
-    close_browser()
-    if screenshot_paths:
-        ctx.screenshot_before = screenshot_paths[-1]
+    # Take the "before fix" screenshot programmatically so the name is always canonical
+    # and it always captures the current browser state (kanban board after go_back).
+    if use_browser:
+        canonical = f"bug-{ctx.issue_number}-before.png"
+        path = browser_screenshot(canonical)
+        if not path.startswith("Error"):
+            ctx.screenshot_before = path
+            print(f"[triage] before-screenshot: {path}", flush=True)
 
+    close_browser()
     return "\n".join(log_parts)
 
 
@@ -296,7 +299,7 @@ _REPORT_TOOL = {
             "root_cause":    {"type": "string", "description": "One sentence: what is wrong and why"},
             "confidence":    {"type": "number", "description": "0.0–1.0 confidence score"},
             "files":         {"type": "array", "items": {"type": "string"}, "description": "Affected file paths"},
-            "buggy_pattern": {"type": "string", "description": "Exact wrong string/condition in the source"},
+            "buggy_pattern": {"type": "string", "description": "Exact wrong token/operator/value on a SINGLE LINE — short enough to grep for (≤80 chars). Example: '=== currentView.doneBucketId' or 'And(\"done = true\")'. No newlines."},
         },
         "required": ["root_cause", "confidence", "files", "buggy_pattern"],
     },
@@ -339,7 +342,10 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
             f"BUG TYPE: {bug_type}\n"
             f"SEARCH DIRECTORY: {search_dir}\n"
             f"FILE TYPES: {file_ext} ONLY — do NOT read files of other types.\n\n"
-            f"SEARCH STRATEGY (follow in order):\n"
+            f"IMPORTANT: If the reproduction log below already contains the buggy source code, "
+            f"call report_root_cause IMMEDIATELY — no tool calls needed. "
+            f"The reproduction log may contain file contents from the reproduce phase.\n\n"
+            f"SEARCH STRATEGY (only if log is insufficient):\n"
             f"1. FILENAME FIRST — find files whose NAME contains a keyword from the issue title:\n"
             f"   find {search_dir} -name '*<keyword>*' | grep -v test | grep -v node_modules\n"
             f"2. READ THE FILE — read_file the best candidate. Look for the specific wrong value/condition.\n"
@@ -349,7 +355,7 @@ def _analyze_root_cause(ctx: BugContext, tracker: CostTracker) -> tuple[str, flo
             f"NEVER read _test files, swagger, or node_modules.\n\n"
             f"Issue: {ctx.issue_title}\n"
             f"Repo: {ctx.repo_path}\n\n"
-            f"Reproduction log:\n{ctx.reproduction_log[:3000]}\n\n"
+            f"Reproduction log (may contain source file contents):\n{ctx.reproduction_log[:8000]}\n\n"
             "When done, call report_root_cause with your findings."
         ),
     }]

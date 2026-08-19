@@ -4,6 +4,18 @@ This document walks through the complete lifecycle of a bug, from a GitHub issue
 
 ---
 
+
+<!--
+YOTAM:
+Open items:
+0. test my hidden bug
+1. when tiraging, in case of low confidance when looking for root cause, lets add another step - try harder with Opus.
+2. how do we verify a fix works? 
+2. a. can we make a proff with console for be and playwright for fe?
+2. b. can we have confidance for this as well? and in case of low confidance try to use Opus?
+3. seems like the agent have a big hint on how to solve the kanban bug: KANBAN VERIFY STEPS (follow exactly)
+-->
+
 ## Entry Points
 
 There are two ways to trigger the pipeline:

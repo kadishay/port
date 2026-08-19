@@ -132,8 +132,9 @@ def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
         "13. browser_click '.button--mark-done'\n"
         "14. browser_wait 2000ms\n"
         "15. browser_go_back  (IMPORTANT: use go_back, not navigate, to keep Kanban state in memory)\n"
-        "16. browser_wait 2000ms\n"
-        f"17. browser_screenshot 'bug-{ctx.issue_number}-after.png'  — FIX VERIFIED: task should now appear in Done column (not To-Do)\n"
+        "16. browser_wait 3000ms\n"
+        "After step 16, STOP immediately — do NOT call browser_screenshot. "
+        "A screenshot will be taken automatically.\n"
         if is_kanban else ""
     )
 
@@ -167,8 +168,6 @@ def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
         for block in response.content:
             if block.type == "tool_use":
                 result = _execute_browser_tool(block.name, block.input)
-                if block.name == "browser_screenshot" and not result.startswith("Error"):
-                    ctx.screenshot_after = result
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -177,6 +176,13 @@ def _verify_fix(ctx: BugContext, tracker: CostTracker) -> None:
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
+
+    # Take the after-screenshot programmatically with a canonical name
+    canonical = f"bug-{ctx.issue_number}-after.png"
+    path = browser_screenshot(canonical)
+    if not path.startswith("Error"):
+        ctx.screenshot_after = path
+        print(f"[solve] after-screenshot: {path}", flush=True)
 
     close_browser()
 
