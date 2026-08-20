@@ -22,7 +22,7 @@ Net effect: Vikunja backend + frontend + agent all run in **one Railway service*
 - No changes to agent business logic in this plan except the concurrency lock (Task 1) — this is a deployment/infra plan, not a refactor.
 - The container must reach a **working parity state** with the current local demo: same hardcoded `localhost:3456`/`:4173` addresses, same Vikunja project/view/bucket IDs the prompts assume (project 3, view 20, buckets 13/14/15). Achieved by migrating the actual local `vikunja.db` onto the Railway volume rather than seeding a fresh instance — a fresh instance's auto-generated IDs are not guaranteed to match.
 - Secrets (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_API_TOKEN`) are set as Railway service variables, never baked into the image or committed.
-- `GITHUB_TOKEN` is reused for `git push` at container-startup (via a runtime `git remote set-url` using the token) — no separate SSH key needed, no token written to disk in the image layer.
+- `GITHUB_TOKEN` is reused for `git push` at container-startup (via a runtime `git remote set-url` using the token) — no separate SSH key needed, never baked into the image layer. (It IS written to disk on the volume, as part of the persisted `.git/config` — acceptable for a single-tenant deployment, but distinct from "never written to disk.")
 
 ---
 
@@ -37,6 +37,7 @@ Net effect: Vikunja backend + frontend + agent all run in **one Railway service*
 **Interfaces:**
 - Produces: a module-level `threading.Lock()` in `orchestrator.py` held for the full duration of `run_pipeline()`'s working-tree-mutating section (triage's `run_shell`/`read_file` exploration doesn't need to block, but `solve.py`'s branch-checkout-through-push sequence does at minimum).
 - Simplest correct option: wrap the entire `run_pipeline(issue_number)` body in the lock. Serializes all pipeline runs globally (no two issues process concurrently) — acceptable at this scale; a per-repo-path lock would be over-engineering for a single-Vikunja-instance deployment.
+- The lock can be held for up to ~30 minutes at a stretch when the in-flight run is parked in `solve.py`'s HITL approval wait — this is intentional (the working tree holds a checked-out `fix/issue-N` branch for the whole wait), not a bug, and is called out with a comment at the lock definition in `orchestrator.py`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -136,10 +137,12 @@ Poll `http://localhost:3456` and `http://localhost:4173` (simple curl-in-a-loop 
 
 - [ ] **Step 1:** Create the Railway service from this repo, confirm it detects and uses the root `Dockerfile` (not Nixpacks).
 - [ ] **Step 2:** Attach a Volume, mounted at the path used for `VIKUNJA_REPO_PATH` (e.g. `/data/vikunja`).
-- [ ] **Step 3:** Set service variables: `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_REPO=kadishay/vikunja`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_REPO_PATH=/data/vikunja`, `VIKUNJA_API_BASE=http://localhost:3456`, `VIKUNJA_API_TOKEN`, `PLAYWRIGHT_ENABLED=true`, `PLAYWRIGHT_HEADLESS=true`.
+- [ ] **Step 3:** Set service variables: `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_REPO=kadishay/vikunja`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_REPO_PATH=/data/vikunja`, `VIKUNJA_API_BASE=http://localhost:3456`, `VIKUNJA_API_TOKEN`, `PLAYWRIGHT_ENABLED=true`, `PLAYWRIGHT_HEADLESS=true`, `VIKUNJA_USERNAME`, `VIKUNJA_PASSWORD` (required for the agent's own login/token-refresh flow — without them, every FE reproduction silently fails to authenticate), `NOTIFY_USER`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_CHANNEL` (Phase 2 parity), `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` (telemetry + dashboard).
 - [ ] **Step 4:** Generate Railway's public domain, confirm it serves the agent's `:9090` webhook port (set `PORT`/expose config accordingly if Railway requires it).
 - [ ] **Step 5:** Complete the Task 3 Step 2 manual seed-data upload onto the new volume.
 - [ ] **Step 6:** First deploy — watch build + boot logs, confirm the Task 3 Step 6 readiness check passes and the agent starts.
+
+**Watch items:** expect the Volume to grow to several GB (the cloned Vikunja repo plus frontend `node_modules`) — request at least 5–10 GB. Expect the built image itself to land around 4 GB (Playwright base image + Go toolchain + Node), which is normal for this single-image approach, not a sign something's wrong.
 
 ---
 
