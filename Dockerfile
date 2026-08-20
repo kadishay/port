@@ -13,15 +13,13 @@
 # why this plan chose a single Dockerfile over Railway's Nixpacks builder
 # (Nixpacks has no clean apt-get equivalent for those deps).
 #
-# Tag pinned to v1.62.0-jammy: as of this writing, pip's latest published
-# `playwright` package is also 1.62.0 (checked via `pypi.org/pypi/playwright/json`),
-# and this repo's requirements.txt pins only a floor (`playwright>=1.45.0`),
-# so `pip install -r requirements.txt` resolves to the newest release available
-# at build time. Keeping this tag's version in sync with whatever that
-# resolves to is what avoids Playwright re-downloading a mismatched browser
-# build at runtime (the base image bakes browser binaries into
-# /ms-playwright at exactly the tag's playwright version). If requirements.txt
-# ever pins `playwright` to an exact version, update this tag to match.
+# Tag pinned to v1.62.0-jammy, matched exactly by requirements.txt's
+# `playwright==1.62.0` pin (no floor/range — version drift here would mean
+# `pip install -r requirements.txt` resolving a playwright pip package that
+# doesn't match the browser binaries this base image bakes into
+# /ms-playwright, causing Playwright to re-download a mismatched Chromium
+# build at runtime instead of using what's already in the image). If this
+# tag is ever bumped, bump requirements.txt's pin to match, and vice versa.
 FROM mcr.microsoft.com/playwright/python:v1.62.0-jammy
 
 # apt-get installs below (Go's build-essential, Node via NodeSource) run
@@ -39,7 +37,7 @@ WORKDIR /app
 # depends on github.com/mattn/go-sqlite3, a CGO-based SQLite driver — `mage
 # build` will fail without a C compiler on PATH.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential && \
+    apt-get install -y --no-install-recommends build-essential git curl ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://go.dev/dl/go1.26.4.linux-amd64.tar.gz -o /tmp/go.tar.gz && \
     tar -C /usr/local -xzf /tmp/go.tar.gz && \
@@ -85,5 +83,10 @@ COPY agent/ ./agent/
 # frontend, and the agent webhook server together at container boot.
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
+
+# Lets Railway auto-detect the target port for its public domain instead of
+# requiring manual port configuration — the agent's webhook server
+# (agent/main.py) binds to :9090.
+EXPOSE 9090
 
 ENTRYPOINT ["/app/start.sh"]
