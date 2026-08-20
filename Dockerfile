@@ -48,6 +48,17 @@ ENV GOPATH="/root/go"
 
 RUN go install github.com/magefile/mage@latest
 
+# Configure a git author identity for the container's (root) user. Without
+# this, `git commit` inside agent/solve.py fails with "Author identity
+# unknown" — solve.py treats ANY non-zero exit from `git commit` as "no
+# file changes to commit" (see agent/solve.py:116-125), so a missing
+# identity would silently discard every real fix instead of erroring
+# loudly. Baked into the image (not start.sh) since it's a static,
+# container-wide setting that never needs to vary per boot; --global
+# writes to /root/.gitconfig, which this image never overrides afterward.
+RUN git config --global user.email "agent@bugtriage.local" && \
+    git config --global user.name "Bug Triage Agent"
+
 # --- Step 3: Install Node + pnpm --------------------------------------------
 # Node major version 24 matches Vikunja frontend's package.json
 # ("engines": { "node": ">=24.0.0" }); pnpm version matches package.json's
