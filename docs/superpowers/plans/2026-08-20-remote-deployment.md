@@ -100,7 +100,7 @@ Exclude `demo/`, `docs/*.pdf`, `docs/*.png`, `.git/`, `__pycache__/`, `tests/` �
 
 - [ ] **Step 1: First-run repo bootstrap**
 
-If `$VIKUNJA_REPO_PATH` (pointed at the mounted volume, e.g. `/data/vikunja`) doesn't contain a `.git` directory: clone `kadishay/vikunja` into it. If it does: leave it as-is (don't force-reset — a redeploy shouldn't discard an in-progress `fix/issue-N` branch from a run that was interrupted by a redeploy).
+If `$VIKUNJA_REPO_PATH` (pointed at a subdirectory of the mounted volume, e.g. `/data/vikunja` — see Task 4 Step 2) doesn't contain a `.git` directory: `git init` it in place, add `origin`, `fetch`, and `checkout -f main`. This (rather than a plain `git clone`) is what lets it work whether the directory is empty or already has non-repo files on it — e.g. a seed `vikunja.db`/`config.yml` pre-placed on the volume before the repo is ever cloned (Step 2 below), since `git clone` refuses to clone into a non-empty directory. If `.git` already exists (redeploy): never force-reset — a redeploy shouldn't discard an in-progress `fix/issue-N` branch from a run that was interrupted by a previous redeploy. Only advance it when it's safe to: if the working tree is clean and currently on `main`, `fetch` + `merge --ff-only origin/main` to pick up new commits; otherwise leave the branch alone untouched (an in-progress run owns it).
 
 - [ ] **Step 2: Seed data migration (one-time, manual precondition — not scripted)**
 
@@ -136,7 +136,7 @@ Poll `http://localhost:3456` and `http://localhost:4173` (simple curl-in-a-loop 
 **Why:** connects the image/volume/domain/secrets together. Dashboard/CLI steps, not code.
 
 - [ ] **Step 1:** Create the Railway service from this repo, confirm it detects and uses the root `Dockerfile` (not Nixpacks).
-- [ ] **Step 2:** Attach a Volume, mounted at the path used for `VIKUNJA_REPO_PATH` (e.g. `/data/vikunja`).
+- [ ] **Step 2:** Attach a Volume, mounted at a **parent** directory of `VIKUNJA_REPO_PATH` (e.g. mount at `/data`, with `VIKUNJA_REPO_PATH=/data/vikunja` as a subdirectory of it) — not mounted directly at the `VIKUNJA_REPO_PATH` path itself. This matters beyond just the Vikunja clone: `agent/tools/browser_tools.py` writes Playwright screenshots to `VIKUNJA_REPO_PATH`'s *parent* directory (deliberately outside the git working tree `solve.py` commits from — see the final-review I8 fix), and that only lands on persistent storage if the volume's mount point actually contains `VIKUNJA_REPO_PATH` rather than terminating exactly at it.
 - [ ] **Step 3:** Set service variables: `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_REPO=kadishay/vikunja`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_REPO_PATH=/data/vikunja`, `VIKUNJA_API_BASE=http://localhost:3456`, `VIKUNJA_API_TOKEN`, `PLAYWRIGHT_ENABLED=true`, `PLAYWRIGHT_HEADLESS=true`, `VIKUNJA_USERNAME`, `VIKUNJA_PASSWORD` (required for the agent's own login/token-refresh flow — without them, every FE reproduction silently fails to authenticate), `NOTIFY_USER`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_CHANNEL` (Phase 2 parity), `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` (telemetry + dashboard).
 - [ ] **Step 4:** Generate Railway's public domain, confirm it serves the agent's `:9090` webhook port (set `PORT`/expose config accordingly if Railway requires it).
 - [ ] **Step 5:** Complete the Task 3 Step 2 manual seed-data upload onto the new volume.
