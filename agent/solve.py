@@ -118,7 +118,23 @@ def run_solve(ctx: BugContext, gh: GitHubClient, tracker: CostTracker) -> BugCon
         f"git -C {ctx.repo_path} commit -m 'fix: proposed fix for #{ctx.issue_number} — {safe_title}'"
     )
     if rc != 0:
-        msg = "⚠️ Fix agent ran but produced no file changes — no commit to push."
+        cost_line = f"\n\n💰 Cost so far: ${tracker.total_cost():.4f}"
+        if not diff.strip():
+            msg = (
+                "⚠️ Fix agent ran but produced no file changes — no commit to push.\n\n"
+                "**Why:** the fix-apply step didn't modify any files in the Vikunja "
+                "checkout. Usually this means the agent couldn't identify a concrete "
+                "code change for this issue — the report may be too vague, or the "
+                "described behavior doesn't match anything in the codebase."
+                f"{cost_line}"
+            )
+        else:
+            msg = (
+                "⚠️ Fix agent produced file changes, but `git commit` itself failed "
+                "— nothing was pushed.\n\n"
+                f"**Why:** git error output:\n```\n{commit_out.strip()[:500]}\n```"
+                f"{cost_line}"
+            )
         gh.post_comment(ctx.issue_number, msg)
         print(f"[solve] #{ctx.issue_number} — {msg}", flush=True)
         _abort_fix(ctx.repo_path, fix_branch)
