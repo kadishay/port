@@ -1,0 +1,12 @@
+demo/
+docs/*.pdf
+docs/*.png
+.git/
+**/__pycache__/
+tests/
+.env
+.venv/
+*.db
+bugs/
+docs/
+dashboard.html

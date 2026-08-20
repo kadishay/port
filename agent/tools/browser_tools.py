@@ -58,10 +58,33 @@ def browser_get_text(selector: str) -> str:
         return f"get_text failed for '{selector}': {e}"
 
 
+def _screenshots_base_dir() -> Path:
+    """Directory to root the vikunja-screenshots/ folder under.
+
+    On Railway, `tempfile.gettempdir()` is the container's ephemeral
+    filesystem — unreachable once the deployment is remote, since there's
+    no laptop filesystem to browse afterward. When VIKUNJA_REPO_PATH is
+    set (the Railway deployment), screenshots go under its *parent*
+    directory instead: still on the same Railway-mounted persistent
+    Volume (the volume is mounted at a directory that contains
+    VIKUNJA_REPO_PATH), so they survive container restarts, but
+    deliberately outside VIKUNJA_REPO_PATH itself — agent/solve.py runs
+    `git add -A && git commit` inside VIKUNJA_REPO_PATH when proposing a
+    fix, and screenshots written inside that tree would get swept into
+    the fix commit and corrupt the PR diff. Falls back to
+    tempfile.gettempdir() when VIKUNJA_REPO_PATH isn't set, preserving
+    current local dev/test behavior unchanged.
+    """
+    repo_path = os.environ.get("VIKUNJA_REPO_PATH")
+    if repo_path:
+        return Path(repo_path).parent
+    return Path(tempfile.gettempdir())
+
+
 def browser_screenshot(filename: str) -> str:
     """Take a screenshot and save it. Returns the absolute path to the saved file."""
     page = _get_page()
-    out_dir = Path(tempfile.gettempdir()) / "vikunja-screenshots"
+    out_dir = _screenshots_base_dir() / "vikunja-screenshots"
     out_dir.mkdir(exist_ok=True)
     path = out_dir / filename
     page.screenshot(path=str(path))

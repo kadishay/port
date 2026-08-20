@@ -1,8 +1,17 @@
+import os
 import shlex
 import subprocess
 
 
 def run_shell(cmd: str, cwd: str | None = None, timeout: int = 120) -> tuple[str, str, int]:
+    # Strip ambient GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE before spawning the subprocess.
+    # Git injects these into the environment of any process it invokes hooks from (e.g.
+    # a pre-commit hook), pointing at the repo that triggered the hook. If inherited
+    # here, they silently override `cwd=` for any git command this function runs,
+    # redirecting it away from the intended repo_path.
+    env = os.environ.copy()
+    for var in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+        env.pop(var, None)
     result = subprocess.run(
         cmd,
         shell=True,
@@ -10,6 +19,7 @@ def run_shell(cmd: str, cwd: str | None = None, timeout: int = 120) -> tuple[str
         text=True,
         cwd=cwd,
         timeout=timeout,
+        env=env,
     )
     return result.stdout, result.stderr, result.returncode
 

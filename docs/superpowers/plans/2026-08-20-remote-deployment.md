@@ -22,7 +22,7 @@ Net effect: Vikunja backend + frontend + agent all run in **one Railway service*
 - No changes to agent business logic in this plan except the concurrency lock (Task 1) — this is a deployment/infra plan, not a refactor.
 - The container must reach a **working parity state** with the current local demo: same hardcoded `localhost:3456`/`:4173` addresses, same Vikunja project/view/bucket IDs the prompts assume (project 3, view 20, buckets 13/14/15). Achieved by migrating the actual local `vikunja.db` onto the Railway volume rather than seeding a fresh instance — a fresh instance's auto-generated IDs are not guaranteed to match.
 - Secrets (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_API_TOKEN`) are set as Railway service variables, never baked into the image or committed.
-- `GITHUB_TOKEN` is reused for `git push` at container-startup (via a runtime `git remote set-url` using the token) — no separate SSH key needed, no token written to disk in the image layer.
+- `GITHUB_TOKEN` is reused for `git push` at container-startup (via a runtime `git remote set-url` using the token) — no separate SSH key needed, never baked into the image layer. (It IS written to disk on the volume, as part of the persisted `.git/config` — acceptable for a single-tenant deployment, but distinct from "never written to disk.")
 
 ---
 
@@ -37,6 +37,7 @@ Net effect: Vikunja backend + frontend + agent all run in **one Railway service*
 **Interfaces:**
 - Produces: a module-level `threading.Lock()` in `orchestrator.py` held for the full duration of `run_pipeline()`'s working-tree-mutating section (triage's `run_shell`/`read_file` exploration doesn't need to block, but `solve.py`'s branch-checkout-through-push sequence does at minimum).
 - Simplest correct option: wrap the entire `run_pipeline(issue_number)` body in the lock. Serializes all pipeline runs globally (no two issues process concurrently) — acceptable at this scale; a per-repo-path lock would be over-engineering for a single-Vikunja-instance deployment.
+- The lock can be held for up to ~30 minutes at a stretch when the in-flight run is parked in `solve.py`'s HITL approval wait — this is intentional (the working tree holds a checked-out `fix/issue-N` branch for the whole wait), not a bug, and is called out with a comment at the lock definition in `orchestrator.py`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -99,11 +100,15 @@ Exclude `demo/`, `docs/*.pdf`, `docs/*.png`, `.git/`, `__pycache__/`, `tests/` �
 
 - [ ] **Step 1: First-run repo bootstrap**
 
-If `$VIKUNJA_REPO_PATH` (pointed at the mounted volume, e.g. `/data/vikunja`) doesn't contain a `.git` directory: clone `kadishay/vikunja` into it. If it does: leave it as-is (don't force-reset — a redeploy shouldn't discard an in-progress `fix/issue-N` branch from a run that was interrupted by a redeploy).
+If `$VIKUNJA_REPO_PATH` (pointed at a subdirectory of the mounted volume, e.g. `/data/vikunja` — see Task 4 Step 2) doesn't contain a `.git` directory: `git init` it in place, add `origin`, `fetch`, and `checkout -f main`. This (rather than a plain `git clone`) is what lets it work whether the directory is empty or already has non-repo files on it — e.g. a seed `vikunja.db`/`config.yml` pre-placed on the volume before the repo is ever cloned (Step 2 below), since `git clone` refuses to clone into a non-empty directory. If `.git` already exists (redeploy): never force-reset — a redeploy shouldn't discard an in-progress `fix/issue-N` branch from a run that was interrupted by a previous redeploy. Only advance it when it's safe to: if the working tree is clean and currently on `main`, `fetch` + `merge --ff-only origin/main` to pick up new commits; otherwise leave the branch alone untouched (an in-progress run owns it).
 
 - [ ] **Step 2: Seed data migration (one-time, manual precondition — not scripted)**
 
-Document as a precondition, not automated in `start.sh`: before first deploy, copy the local `vikunja.db` (and `files/vikunja.db`) onto the Railway volume at the path `config.yml` expects, so project 3 / view 20 / buckets 13-15 match what the prompts hardcode. Uploading a large binary file into a fresh Railway volume is a one-time manual step (`railway volume` upload or a temporary debug shell), not something to script into `start.sh`.
+Document as a precondition, not automated in `start.sh`: before first deploy, copy the real local `vikunja.db` onto the Railway volume at `$VIKUNJA_REPO_PATH/vikunja.db`, so project 3 / view 20 / buckets 13-15 match what the prompts hardcode.
+
+**Where the real file actually is (verified live, don't trust the repo-root path):** `config.yml`'s `database.path: "./vikunja.db"` is relative, and since `service.rootpath` isn't explicitly configured, Vikunja resolves it to a platform-specific user-data directory rather than the repo folder — on macOS, `~/Library/Application Support/Vikunja/vikunja.db`. The repo-root `vikunja.db` (and `files/vikunja.db`) are stale, unused, effectively-empty files; migrating those would upload nothing useful. Confirm the real path via `lsof -p <vikunja-pid> | grep '\.db'` on the running local process rather than assuming. If the source database is live (WAL mode), checkpoint it into a clean single file first: `sqlite3 <path>/vikunja.db "PRAGMA wal_checkpoint(TRUNCATE);"`. Upload via `railway ssh` (native SSH support, `railway ssh config` writes an `~/.ssh/config` block, then plain `cat vikunja.db | ssh <alias> -- tee $VIKUNJA_REPO_PATH/vikunja.db > /dev/null`) rather than `railway volume` upload, which isn't a supported CLI feature as of this writing. There's no separate `files/` directory to migrate — no attachment storage exists at the equivalent local path for this deployment's demo bugs.
+
+`config.yml` itself does not need migrating: its JWT signing secret is intentionally random-per-restart by Vikunja's own default (see the comment at `config.yml:3-4`), true locally as well as remotely, and the agent already re-authenticates via `VIKUNJA_USERNAME`/`VIKUNJA_PASSWORD` login at the start of every pipeline run (`agent/orchestrator.py`'s `_refresh_vikunja_token`) rather than depending on a fixed token — so a fresh, config-less Vikunja boot on the container is fine as long as the database itself (the actual source of the hardcoded IDs) is in place.
 
 - [ ] **Step 3: Configure git push credentials at runtime**
 
@@ -135,11 +140,13 @@ Poll `http://localhost:3456` and `http://localhost:4173` (simple curl-in-a-loop 
 **Why:** connects the image/volume/domain/secrets together. Dashboard/CLI steps, not code.
 
 - [ ] **Step 1:** Create the Railway service from this repo, confirm it detects and uses the root `Dockerfile` (not Nixpacks).
-- [ ] **Step 2:** Attach a Volume, mounted at the path used for `VIKUNJA_REPO_PATH` (e.g. `/data/vikunja`).
-- [ ] **Step 3:** Set service variables: `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_REPO=kadishay/vikunja`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_REPO_PATH=/data/vikunja`, `VIKUNJA_API_BASE=http://localhost:3456`, `VIKUNJA_API_TOKEN`, `PLAYWRIGHT_ENABLED=true`, `PLAYWRIGHT_HEADLESS=true`.
+- [ ] **Step 2:** Attach a Volume, mounted at a **parent** directory of `VIKUNJA_REPO_PATH` (e.g. mount at `/data`, with `VIKUNJA_REPO_PATH=/data/vikunja` as a subdirectory of it) — not mounted directly at the `VIKUNJA_REPO_PATH` path itself. This matters beyond just the Vikunja clone: `agent/tools/browser_tools.py` writes Playwright screenshots to `VIKUNJA_REPO_PATH`'s *parent* directory (deliberately outside the git working tree `solve.py` commits from — see the final-review I8 fix), and that only lands on persistent storage if the volume's mount point actually contains `VIKUNJA_REPO_PATH` rather than terminating exactly at it.
+- [ ] **Step 3:** Set service variables: `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `GITHUB_REPO=kadishay/vikunja`, `GITHUB_WEBHOOK_SECRET`, `VIKUNJA_REPO_PATH=/data/vikunja`, `VIKUNJA_API_BASE=http://localhost:3456`, `VIKUNJA_API_TOKEN`, `PLAYWRIGHT_ENABLED=true`, `PLAYWRIGHT_HEADLESS=true`, `VIKUNJA_USERNAME`, `VIKUNJA_PASSWORD` (required for the agent's own login/token-refresh flow — without them, every FE reproduction silently fails to authenticate), `NOTIFY_USER`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_CHANNEL` (Phase 2 parity), `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` (telemetry + dashboard).
 - [ ] **Step 4:** Generate Railway's public domain, confirm it serves the agent's `:9090` webhook port (set `PORT`/expose config accordingly if Railway requires it).
 - [ ] **Step 5:** Complete the Task 3 Step 2 manual seed-data upload onto the new volume.
 - [ ] **Step 6:** First deploy — watch build + boot logs, confirm the Task 3 Step 6 readiness check passes and the agent starts.
+
+**Watch items:** expect the Volume to grow to several GB (the cloned Vikunja repo plus frontend `node_modules`) — request at least 5–10 GB. Expect the built image itself to land around 4 GB (Playwright base image + Go toolchain + Node), which is normal for this single-image approach, not a sign something's wrong.
 
 ---
 
