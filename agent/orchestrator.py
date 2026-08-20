@@ -1,4 +1,5 @@
 import os
+import threading
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -35,79 +36,87 @@ def _refresh_vikunja_token() -> None:
         print(f"[token] Failed to refresh token: {e}", flush=True)
 
 
+# Serializes all pipeline runs globally: two overlapping/retried webhook deliveries
+# must never mutate the shared Vikunja working tree (git checkout/commit/push) at the
+# same time. Deliberately a single global lock, not per-repo-path — this deployment
+# only ever drives one Vikunja working tree.
+_pipeline_lock = threading.Lock()
+
+
 def run_pipeline(issue_number: int) -> BugContext | None:
-    load_dotenv(override=True)  # Re-read .env on every run so live server picks up changes
-    _refresh_vikunja_token()
-    gh = GitHubClient()
-    issue = gh.get_issue(issue_number)
+    with _pipeline_lock:
+        load_dotenv(override=True)  # Re-read .env on every run so live server picks up changes
+        _refresh_vikunja_token()
+        gh = GitHubClient()
+        issue = gh.get_issue(issue_number)
 
-    fix_branch = f"fix/issue-{issue_number}"
-    existing_pr = gh.get_open_pr_for_branch(fix_branch)
-    if existing_pr:
-        msg = f"ℹ️ Issue #{issue_number} already has an open PR: {existing_pr['html_url']} — skipping (no re-triage/re-solve)."
-        print(f"[orchestrator] #{issue_number} — {msg}", flush=True)
-        gh.post_comment(issue_number, msg)
-        return None
+        fix_branch = f"fix/issue-{issue_number}"
+        existing_pr = gh.get_open_pr_for_branch(fix_branch)
+        if existing_pr:
+            msg = f"ℹ️ Issue #{issue_number} already has an open PR: {existing_pr['html_url']} — skipping (no re-triage/re-solve)."
+            print(f"[orchestrator] #{issue_number} — {msg}", flush=True)
+            gh.post_comment(issue_number, msg)
+            return None
 
-    ctx = BugContext(
-        issue_number=issue_number,
-        issue_title=issue["title"],
-        issue_body=issue.get("body") or "",
-        repo_path=os.environ.get("VIKUNJA_REPO_PATH", "/Users/kadishay/Code/vikunja"),
-    )
+        ctx = BugContext(
+            issue_number=issue_number,
+            issue_title=issue["title"],
+            issue_body=issue.get("body") or "",
+            repo_path=os.environ.get("VIKUNJA_REPO_PATH", "/Users/kadishay/Code/vikunja"),
+        )
 
-    tracker = CostTracker()
-    start = time.time()
-    thread_ts = _notify(f"📥 Issue #{issue_number} received: *{issue['title']}* — starting triage")
-    ctx.slack_thread_ts = thread_ts or ""
+        tracker = CostTracker()
+        start = time.time()
+        thread_ts = _notify(f"📥 Issue #{issue_number} received: *{issue['title']}* — starting triage")
+        ctx.slack_thread_ts = thread_ts or ""
 
-    crashed = False
-    try:
-        ctx = run_triage(ctx, gh, tracker)
+        crashed = False
+        try:
+            ctx = run_triage(ctx, gh, tracker)
 
-        if ctx.not_a_bug:
-            _notify_thread(ctx, f"🚫 Issue #{issue_number} closed as not a bug: {ctx.not_a_bug_reason}")
-            return ctx
+            if ctx.not_a_bug:
+                _notify_thread(ctx, f"🚫 Issue #{issue_number} closed as not a bug: {ctx.not_a_bug_reason}")
+                return ctx
 
-        if ctx.unable_to_reproduce:
-            status = "closed automatically" if ctx.issue_closed else "left open for human review"
+            if ctx.unable_to_reproduce:
+                status = "closed automatically" if ctx.issue_closed else "left open for human review"
+                _notify_thread(ctx, (
+                    f"🔍 Issue #{issue_number} could not be reproduced "
+                    f"(confidence {ctx.reproduction_confidence:.0%}) — {status}."
+                ))
+                return ctx
+
+            people_tags: list[str] = []
+            if ctx.blame_author:
+                people_tags.append(f"@{ctx.blame_author} (introduced)")
+            people_tags.extend(f"@{e} (expert)" for e in ctx.area_experts)
+            people_line = f"\ncc: {', '.join(people_tags)}" if people_tags else ""
+
             _notify_thread(ctx, (
-                f"🔍 Issue #{issue_number} could not be reproduced "
-                f"(confidence {ctx.reproduction_confidence:.0%}) — {status}."
+                f"🔬 Triage complete — Severity: *{ctx.severity.value}* | Confidence: {ctx.confidence:.0%}\n"
+                f"Root cause: {ctx.root_cause[:200]}{people_line}"
             ))
-            return ctx
 
-        people_tags: list[str] = []
-        if ctx.blame_author:
-            people_tags.append(f"@{ctx.blame_author} (introduced)")
-        people_tags.extend(f"@{e} (expert)" for e in ctx.area_experts)
-        people_line = f"\ncc: {', '.join(people_tags)}" if people_tags else ""
+            gh.add_label(issue_number, f"severity:{ctx.severity.value.lower()}")
+            _notify_thread(ctx, f"🔧 Starting automated fix for #{issue_number}...")
+            ctx = run_solve(ctx, gh, tracker)
+            if ctx.pr_url:
+                _notify_thread(ctx, f"✅ PR opened: {ctx.pr_url}")
+            else:
+                _notify_thread(ctx, f"⚠️ Fix aborted or rejected. Decision: {ctx.autonomy_decision.value}")
+        except Exception as e:
+            crashed = True
+            error_msg = f"❌ Pipeline crashed: {type(e).__name__}: {e}"
+            print(f"[orchestrator] #{issue_number} — {error_msg}", flush=True)
+            gh.post_comment(issue_number, error_msg)
+            _notify_thread(ctx, error_msg)
+        finally:
+            record_run(ctx, tracker, time.time() - start, crashed=crashed)
+            cost_summary = tracker.summary()
+            print(cost_summary, flush=True)
+            _notify_thread(ctx, cost_summary)
 
-        _notify_thread(ctx, (
-            f"🔬 Triage complete — Severity: *{ctx.severity.value}* | Confidence: {ctx.confidence:.0%}\n"
-            f"Root cause: {ctx.root_cause[:200]}{people_line}"
-        ))
-
-        gh.add_label(issue_number, f"severity:{ctx.severity.value.lower()}")
-        _notify_thread(ctx, f"🔧 Starting automated fix for #{issue_number}...")
-        ctx = run_solve(ctx, gh, tracker)
-        if ctx.pr_url:
-            _notify_thread(ctx, f"✅ PR opened: {ctx.pr_url}")
-        else:
-            _notify_thread(ctx, f"⚠️ Fix aborted or rejected. Decision: {ctx.autonomy_decision.value}")
-    except Exception as e:
-        crashed = True
-        error_msg = f"❌ Pipeline crashed: {type(e).__name__}: {e}"
-        print(f"[orchestrator] #{issue_number} — {error_msg}", flush=True)
-        gh.post_comment(issue_number, error_msg)
-        _notify_thread(ctx, error_msg)
-    finally:
-        record_run(ctx, tracker, time.time() - start, crashed=crashed)
-        cost_summary = tracker.summary()
-        print(cost_summary, flush=True)
-        _notify_thread(ctx, cost_summary)
-
-    return ctx
+        return ctx
 
 
 def _notify(message: str) -> str | None:
