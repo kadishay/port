@@ -7,14 +7,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import FileResponse
 
 app = FastAPI()
+
+_DASHBOARD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard.html")
 
 
 def enqueue_issue(issue_number: int) -> None:
     from agent.orchestrator import run_pipeline
     thread = threading.Thread(target=run_pipeline, args=(issue_number,), daemon=True)
     thread.start()
+
+
+@app.get("/dashboard")
+async def dashboard() -> FileResponse:
+    return FileResponse(_DASHBOARD_PATH, media_type="text/html")
 
 
 @app.post("/webhook")

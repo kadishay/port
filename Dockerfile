@@ -89,6 +89,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # `git push` has a real, writable, credentialed clone.
 COPY agent/ ./agent/
 
+# Static monitoring dashboard — served by the agent's own webhook server at
+# GET /dashboard. Talks to Supabase directly from the browser (its anon key
+# is meant to be public), so this is just a static asset, not a secret.
+COPY dashboard.html ./dashboard.html
+
 # --- Step 6: Entrypoint ------------------------------------------------------
 # start.sh (Task 3) coordinates starting the Vikunja backend, Vikunja
 # frontend, and the agent webhook server together at container boot.
