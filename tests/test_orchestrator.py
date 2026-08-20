@@ -148,4 +148,7 @@ def test_run_pipeline_serializes_concurrent_runs(mock_record, mock_gh_class, moc
         for t in threads:
             t.join(timeout=5)
 
-    assert max_active <= 1, "triage/solve ran concurrently across pipeline runs — lock not effective"
+    for t in threads:
+        assert not t.is_alive(), "thread still alive after join(timeout=5) — possible deadlock"
+
+    assert max_active == 1, "triage/solve ran concurrently across pipeline runs — lock not effective"

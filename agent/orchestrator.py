@@ -40,11 +40,21 @@ def _refresh_vikunja_token() -> None:
 # must never mutate the shared Vikunja working tree (git checkout/commit/push) at the
 # same time. Deliberately a single global lock, not per-repo-path — this deployment
 # only ever drives one Vikunja working tree.
+#
+# NOTE: this lock can be held for up to ~30 minutes at a stretch when the
+# in-flight run is parked in solve.py's HITL approval wait — that's
+# intentional (the working tree holds a checked-out fix/issue-N branch for
+# the whole wait, so a second run must not touch it), not a bug. See the
+# non-blocking-acquire-then-block pattern below for the observability this
+# implies.
 _pipeline_lock = threading.Lock()
 
 
 def run_pipeline(issue_number: int) -> BugContext | None:
-    with _pipeline_lock:
+    if not _pipeline_lock.acquire(blocking=False):
+        print(f"[orchestrator] #{issue_number} — queued behind an in-flight pipeline run", flush=True)
+        _pipeline_lock.acquire()  # now block until it's free
+    try:
         load_dotenv(override=True)  # Re-read .env on every run so live server picks up changes
         _refresh_vikunja_token()
         gh = GitHubClient()
@@ -117,6 +127,8 @@ def run_pipeline(issue_number: int) -> BugContext | None:
             _notify_thread(ctx, cost_summary)
 
         return ctx
+    finally:
+        _pipeline_lock.release()
 
 
 def _notify(message: str) -> str | None:
