@@ -45,11 +45,34 @@ log() {
 # already-cloned repo must never be force-reset (a redeploy shouldn't
 # discard an in-progress fix/issue-N branch from a run interrupted by a
 # previous redeploy).
+#
+# Plain `git clone` doesn't work here: the volume may already have
+# non-repo files on it (e.g. a pre-placed vikunja.db/config.yml from the
+# Step 2 seed-data upload) before the repo is ever cloned, and `git clone`
+# refuses to clone into a non-empty directory. Instead: `git init` +
+# `remote add` + `fetch` + `checkout -f` into the existing directory,
+# which works whether it's empty or has stray non-git files sitting in it.
 if [ ! -d "$VIKUNJA_REPO_PATH/.git" ]; then
-  log "Step 1: $VIKUNJA_REPO_PATH has no .git — cloning ${GITHUB_REPO} (first boot)"
-  git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git" "$VIKUNJA_REPO_PATH"
+  log "Step 1: $VIKUNJA_REPO_PATH has no .git — bootstrapping ${GITHUB_REPO} in place (first boot)"
+  mkdir -p "$VIKUNJA_REPO_PATH"
+  git -C "$VIKUNJA_REPO_PATH" init
+  git -C "$VIKUNJA_REPO_PATH" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+  git -C "$VIKUNJA_REPO_PATH" fetch origin
+  git -C "$VIKUNJA_REPO_PATH" checkout -f main
 else
-  log "Step 1: $VIKUNJA_REPO_PATH already populated — leaving working tree as-is (redeploy)"
+  # Already cloned (redeploy). Never force-reset — that would discard an
+  # in-progress fix/issue-N branch from a run interrupted by a previous
+  # redeploy. Only advance main when it's safe to do so: working tree
+  # clean AND currently on main. Otherwise leave it alone entirely (an
+  # in-progress run owns the working tree right now).
+  current_branch="$(git -C "$VIKUNJA_REPO_PATH" rev-parse --abbrev-ref HEAD)"
+  if [ -z "$(git -C "$VIKUNJA_REPO_PATH" status --porcelain)" ] && [ "$current_branch" = "main" ]; then
+    log "Step 1: $VIKUNJA_REPO_PATH is clean on main — fetching and fast-forwarding (redeploy)"
+    git -C "$VIKUNJA_REPO_PATH" fetch origin
+    git -C "$VIKUNJA_REPO_PATH" merge --ff-only origin/main
+  else
+    log "Step 1: $VIKUNJA_REPO_PATH is on '${current_branch}' (dirty or non-main) — leaving working tree as-is (in-progress run)"
+  fi
 fi
 
 # --- Step 2: Seed data migration ---------------------------------------------
@@ -72,14 +95,22 @@ log "Step 4: building Vikunja backend"
 (cd "$VIKUNJA_REPO_PATH" && mage build)
 
 log "Step 4: starting Vikunja backend"
-"$VIKUNJA_REPO_PATH/vikunja" 2>&1 | sed -u 's/^/[vikunja-be] /' &
+(cd "$VIKUNJA_REPO_PATH" && ./vikunja) 2>&1 | sed -u 's/^/[vikunja-be] /' &
 
 # --- Step 5: Start Vikunja frontend -------------------------------------------
 # pnpm dev (not a production build) to preserve exact parity with the
 # current local demo behavior; kept as a follow-up optimization per the
 # brief, not required for a first working deploy.
-log "Step 5: installing + starting Vikunja frontend"
-(cd "$VIKUNJA_REPO_PATH/frontend" && pnpm install && pnpm dev) 2>&1 | sed -u 's/^/[vikunja-fe] /' &
+#
+# `pnpm install` runs synchronously (blocks), same pattern as Step 4's
+# `mage build` — otherwise a cold install would run concurrently with the
+# Step 6 readiness wait and silently eat into its timeout budget. Only the
+# `pnpm dev` launch itself is backgrounded.
+log "Step 5: installing Vikunja frontend dependencies"
+(cd "$VIKUNJA_REPO_PATH/frontend" && pnpm install)
+
+log "Step 5: starting Vikunja frontend"
+(cd "$VIKUNJA_REPO_PATH/frontend" && pnpm dev) 2>&1 | sed -u 's/^/[vikunja-fe] /' &
 
 # --- Step 6: Wait for both to be reachable ------------------------------------
 # Plain `curl -s -o /dev/null` (no -f): success just means "got a TCP
@@ -109,4 +140,4 @@ wait_for "http://localhost:4173" "vikunja-fe"
 # receives signals directly and its exit is what Railway sees as the
 # container exiting (triggering a restart per Railway's policy).
 log "Step 7: starting agent webhook server (foreground)"
-exec python -m agent.main --serve
+exec python3 -m agent.main --serve
